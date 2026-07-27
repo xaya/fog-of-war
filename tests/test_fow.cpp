@@ -237,13 +237,85 @@ void testMatchesDeployedDungeonchannel() {
 
   uint8_t fh[32], wantFh[32];
   fow::petFlightHash(f1, r, fh);
-  hexTo("5ab8ac6ec6668b0c9fd7350ca971a971b068f6c138dd6cd86a5060a90ea2fe97", wantFh, 32);
-  check(std::memcmp(fh, wantFh, 32) == 0, "and the attribution hash matches");
+  hexTo("a0aae0d065b0014b00ed3e56061796e9f8a9aff7a0b93f6fc25f7c3784a144af", wantFh, 32);
+  check(std::memcmp(fh, wantFh, 32) == 0, "and the commitment root matches");
 
   // Its own element is in its own set, so the self-test bit is 1, and the deployed
   // code reports the same.
   check(fow::petFinish(seed, 7, f1, r) == 1, "and the bit agrees");
   pass("byte-identical to the deployed dungeonchannel blob");
+}
+
+
+void testTheCommitmentIsAMerkleRoot() {
+  // The commitment over a flight is a Merkle root rather than a flat hash, so a
+  // dispute can prove ONE element without shipping the other 129. That is only worth
+  // anything if the tree is rigid, so it is attacked here rather than exercised:
+  // every used leaf must prove, no leaf may prove at the wrong index or against
+  // another flight, and no tampered path or leaf may pass.
+  uint8_t seedA[32], seedB[32];
+  for (int i = 0; i < 32; ++i) { seedA[i] = (uint8_t)(0x11 + i); seedB[i] = (uint8_t)(0x77 + i); }
+  const uint16_t setA[] = {100, 200, 300};
+  const uint16_t setB[] = {200, 100, 400};
+  const int setLen = fow::PET_BUILD_BYTES - 32;
+  static uint8_t fa[fow::PET_BUILD_BYTES], fb[fow::PET_BUILD_BYTES];
+  fow::petBuild(seedA, 5, 100, setA, 3, fa);
+  fow::petBuild(seedB, 5, 200, setB, 3, fb);
+  uint8_t ra[32], rb[32];
+  fow::petRespond(seedA, 5, fb + setLen, ra);
+  fow::petRespond(seedB, 5, fa + setLen, rb);
+
+  uint8_t rootA[32], rootB[32];
+  fow::petFlightHash(fa, ra, rootA);
+  fow::petFlightHash(fb, rb, rootB);
+  check(std::memcmp(rootA, rootB, 32) != 0, "different flights give different roots");
+
+  int proved = 0;
+  for (int i = 0; i < fow::PET_LEAVES_USED; ++i) {
+    uint8_t path[fow::PET_MERKLE_PATH_BYTES];
+    check(fow::petMerklePath(fa, ra, i, path) == 0, "a path builds");
+    const uint8_t* leaf = (i < fow::PET_PAD) ? fa + i * 32
+                        : (i == fow::PET_LEAF_Q) ? fa + fow::PET_PAD * 32 : ra;
+    if (fow::petMerkleVerify(i, leaf, path, rootA) == 1) ++proved;
+  }
+  check(proved == fow::PET_LEAVES_USED,
+        "EVERY USED LEAF PROVES: all 128 set entries, Q, and R");
+
+  {
+    uint8_t path[fow::PET_MERKLE_PATH_BYTES];
+    fow::petMerklePath(fa, ra, 7, path);
+    check(fow::petMerkleVerify(7, fa + 7 * 32, path, rootA) == 1, "leaf 7 proves at 7");
+    check(fow::petMerkleVerify(8, fa + 7 * 32, path, rootA) == 0,
+          "the same leaf does not prove at another index");
+    check(fow::petMerkleVerify(3, fa + 3 * 32, path, rootB) == 0,
+          "and a path does not prove against another flight's root");
+  }
+
+  {
+    uint8_t path[fow::PET_MERKLE_PATH_BYTES];
+    fow::petMerklePath(fa, ra, 11, path);
+    int accepted = 0;
+    for (int b = 0; b < fow::PET_MERKLE_PATH_BYTES; ++b) {
+      uint8_t bad[fow::PET_MERKLE_PATH_BYTES];
+      std::memcpy(bad, path, sizeof bad);
+      bad[b] ^= 0x01;
+      if (fow::petMerkleVerify(11, fa + 11 * 32, bad, rootA) != 0) ++accepted;
+    }
+    check(accepted == 0, "every single-byte tamper of a path is rejected");
+  }
+
+  // R is inside the tree, which is the point: answering with a doctored response
+  // flips a peer's bit without touching the set, and needs no guess about where the
+  // peer is, so it has to be attributable too.
+  {
+    uint8_t other[32], rootOther[32];
+    std::memcpy(other, ra, 32);
+    other[0] ^= 0x01;
+    fow::petFlightHash(fa, other, rootOther);
+    check(std::memcmp(rootA, rootOther, 32) != 0,
+          "changing only the flight-2 response changes the root");
+  }
+  pass("the commitment is a Merkle root: every leaf proves, nothing else does");
 }
 
 }  // namespace
@@ -253,6 +325,7 @@ int main() {
   testRfc7748Vectors();
   testHashToCurveLandsInThePrimeOrderSubgroup();
   testTheBitIsRight();
+  testTheCommitmentIsAMerkleRoot();
   testMatchesDeployedDungeonchannel();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   if (g_failures) { std::printf("FAILED\n"); return 1; }

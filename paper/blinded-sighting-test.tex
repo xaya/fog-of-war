@@ -474,9 +474,11 @@ full flight rebuild at ${\approx}1.98\times10^9$ fuel, thirty times the entire
 per-call cap, whereas verifying a supplied flight against its committed hash and
 recomputing one element costs a measured 15.9~M, which sits alongside the
 17.6~M endgame audit at 51\% of the 66.3~M cap that a single Groth16
-verification already exceeds at 73.6~M. Binding the bytes therefore uses the
-hash the sender already publishes in its own signed move rather than a signature
-scheme inside the blob.
+verification already exceeds at 73.6~M. Binding the bytes therefore uses a
+commitment the sender already publishes in its own signed move rather than a
+signature scheme inside the blob, and that commitment is a Merkle root over the
+flight rather than a flat hash: a dispute then carries one leaf and an eight-step
+path, roughly 350 bytes, instead of the whole 4{,}128-byte flight.
 \item \textbf{Convictions never trust the bit.} ``In sight and stayed
 dark'' and ``disputed a sighting that was not there'' are both adjudicated
 by recomputing $\sight$ (Eq.~\ref{eq:sight}) over tiles bound by

@@ -111,7 +111,49 @@ function petFinish(seed, round, theirS, theirR) {
                        Buffer.from(theirR)) === 0) return 1;
   return 0;
 }
-const petFlightHash = (f1, f2) => sha256(cat(ascii("DCHV"), f1, f2));
+// The commitment is a MERKLE ROOT over the flight, not a flat hash: leaves 0..127 are
+// the sorted blinded set, 128 is Q, 129 is R, then zero padding to 256. Leaf and node
+// preimages are domain-separated (0x00 / 0x01) so a node can never be read as a leaf,
+// and the leaf index is inside the leaf preimage so an element cannot be replayed into
+// another slot. Written out here from the same description the C++ works from.
+const MERKLE_DEPTH = 8;
+const MERKLE_LEAVES = 1 << MERKLE_DEPTH;
+const LEAF_Q = PAD;
+const LEAF_R = PAD + 1;
+const ZERO32 = new Uint8Array(32);
+const merkleLeaf = (i, pt) =>
+  sha256(cat(ascii("DCHV"), Uint8Array.from([0x00]), le16(i), pt));
+const merkleNode = (l, r) => sha256(cat(ascii("DCHV"), Uint8Array.from([0x01]), l, r));
+const leafPoint = (f1, f2, i) =>
+  i < PAD ? f1.slice(i * 32, i * 32 + 32)
+  : i === LEAF_Q ? f1.slice(PAD * 32, PAD * 32 + 32)
+  : i === LEAF_R ? f2
+  : ZERO32;
+function merkleLevels(f1, f2) {
+  const levels = [Array.from({ length: MERKLE_LEAVES }, (_v, i) => merkleLeaf(i, leafPoint(f1, f2, i)))];
+  while (levels[levels.length - 1].length > 1) {
+    const prev = levels[levels.length - 1], next = [];
+    for (let i = 0; i < prev.length; i += 2) next.push(merkleNode(prev[i], prev[i + 1]));
+    levels.push(next);
+  }
+  return levels;
+}
+const petFlightHash = (f1, f2) => merkleLevels(f1, f2)[MERKLE_DEPTH][0];
+function merklePath(f1, f2, leafIndex) {
+  const levels = merkleLevels(f1, f2);
+  const out = [];
+  let idx = leafIndex;
+  for (let d = 0; d < MERKLE_DEPTH; ++d) { out.push(levels[d][idx ^ 1]); idx >>= 1; }
+  return out;
+}
+function merkleVerify(leafIndex, leaf, path, root) {
+  let acc = merkleLeaf(leafIndex, leaf), idx = leafIndex;
+  for (const sib of path) {
+    acc = (idx & 1) === 0 ? merkleNode(acc, sib) : merkleNode(sib, acc);
+    idx >>= 1;
+  }
+  return Buffer.compare(Buffer.from(acc), Buffer.from(root)) === 0;
+}
 
 // ─── 1. the ladder really is X25519 ───────────────────────────────────────────
 {
@@ -159,9 +201,16 @@ const petFlightHash = (f1, f2) => sha256(cat(ascii("DCHV"), f1, f2));
   check(Buffer.from(r).toString("hex") ===
         "01204d2f6b9b94ee0a29055efc49a0ef25e164ff2eb7dbb9e082244d8415cf12",
         "and the flight-2 response matches");
-  check(Buffer.from(petFlightHash(f1, r)).toString("hex") ===
-        "5ab8ac6ec6668b0c9fd7350ca971a971b068f6c138dd6cd86a5060a90ea2fe97",
-        "and the attribution hash matches");
+  const root = petFlightHash(f1, r);
+  check(Buffer.from(root).toString("hex") ===
+        "a0aae0d065b0014b00ed3e56061796e9f8a9aff7a0b93f6fc25f7c3784a144af",
+        "and the commitment ROOT matches");
+  // And the tree is usable: R proves against the root it just produced, and does not
+  // prove at a neighbouring index.
+  check(merkleVerify(LEAF_R, r, merklePath(f1, r, LEAF_R), root),
+        "R proves against the root");
+  check(!merkleVerify(LEAF_Q, r, merklePath(f1, r, LEAF_R), root),
+        "and the same leaf does not prove at another index");
   check(petFinish(seed, 7, f1.slice(0, PAD * 32), r) === 1, "and the bit agrees");
 }
 

@@ -478,18 +478,108 @@ int petFinish(const uint8_t seed[HASH_BYTES], uint16_t round,
   return hit;
 }
 
-void petFlightHash(const uint8_t* flight1, const uint8_t flight2[32],
-                   uint8_t out[HASH_BYTES]) {
-  // One preimage rather than a streaming update: the whole point is that any party
-  // can recompute this byte-for-byte, and a single buffer is the least ambiguous way
-  // to say what is hashed.
-  static const uint8_t TAG_PETFLIGHT[4] = {'D', 'C', 'H', 'V'};
-  static uint8_t buf[4 + PET_BUILD_BYTES + 32];
+namespace {
+
+const uint8_t TAG_PETFLIGHT[4] = {'D', 'C', 'H', 'V'};
+
+// leaf = SHA256("DCHV" || 0x00 || LE16(index) || point). The index is INSIDE the
+// preimage so an element cannot be replayed into a different slot, and the 0x00
+// prefix keeps a leaf from ever colliding with an interior node.
+void merkleLeaf(int index, const uint8_t point[32], uint8_t out[HASH_BYTES]) {
+  uint8_t buf[4 + 1 + 2 + 32];
   int n = 0;
   for (int i = 0; i < 4; ++i) buf[n++] = TAG_PETFLIGHT[i];
-  for (int i = 0; i < PET_BUILD_BYTES; ++i) buf[n++] = flight1[i];
-  for (int i = 0; i < 32; ++i) buf[n++] = flight2[i];
-  sha256(buf, (size_t)n, out);
+  buf[n++] = 0x00;
+  buf[n++] = static_cast<uint8_t>(index);
+  buf[n++] = static_cast<uint8_t>(index >> 8);
+  for (int i = 0; i < 32; ++i) buf[n++] = point[i];
+  sha256(buf, static_cast<size_t>(n), out);
+}
+
+// node = SHA256("DCHV" || 0x01 || left || right).
+void merkleNode(const uint8_t l[HASH_BYTES], const uint8_t r[HASH_BYTES],
+                uint8_t out[HASH_BYTES]) {
+  uint8_t buf[4 + 1 + HASH_BYTES + HASH_BYTES];
+  int n = 0;
+  for (int i = 0; i < 4; ++i) buf[n++] = TAG_PETFLIGHT[i];
+  buf[n++] = 0x01;
+  for (int i = 0; i < HASH_BYTES; ++i) buf[n++] = l[i];
+  for (int i = 0; i < HASH_BYTES; ++i) buf[n++] = r[i];
+  sha256(buf, static_cast<size_t>(n), out);
+}
+
+// The point at a leaf index: the set, then Q, then R, then zero padding. One place,
+// so the root builder and the path builder cannot disagree about the layout.
+const uint8_t* leafPoint(const uint8_t* flight1, const uint8_t flight2[32], int i) {
+  static const uint8_t ZERO[32] = {0};
+  if (i < PET_PAD) return flight1 + i * PET_POINT_BYTES;
+  if (i == PET_LEAF_Q) return flight1 + PET_PAD * PET_POINT_BYTES;
+  if (i == PET_LEAF_R) return flight2;
+  return ZERO;
+}
+
+// The whole tree, bottom level first, packed into one buffer: level 0 is the 256
+// leaf hashes, then 128, 64, ... 1. Static because 256 * 32 bytes is too much stack
+// for a wasm reactor frame, and it is fully overwritten on every call, so nothing
+// carries between calls, so determinism is preserved.
+uint8_t g_tree[2 * PET_MERKLE_LEAVES][HASH_BYTES];
+
+void buildTree(const uint8_t* flight1, const uint8_t flight2[32]) {
+  for (int i = 0; i < PET_MERKLE_LEAVES; ++i)
+    merkleLeaf(i, leafPoint(flight1, flight2, i), g_tree[i]);
+  int base = 0, width = PET_MERKLE_LEAVES;
+  while (width > 1) {
+    const int next = base + width;
+    for (int i = 0; i < width / 2; ++i)
+      merkleNode(g_tree[base + 2 * i], g_tree[base + 2 * i + 1], g_tree[next + i]);
+    base = next;
+    width /= 2;
+  }
+}
+
+}  // namespace
+
+void petFlightHash(const uint8_t* flight1, const uint8_t flight2[32],
+                   uint8_t out[HASH_BYTES]) {
+  if (!flight1 || !flight2 || !out) return;
+  buildTree(flight1, flight2);
+  // The last node written is the root: levels are 256 + 128 + ... + 1 entries.
+  for (int i = 0; i < HASH_BYTES; ++i) out[i] = g_tree[2 * PET_MERKLE_LEAVES - 2][i];
+}
+
+int petMerklePath(const uint8_t* flight1, const uint8_t flight2[32], int leafIndex,
+                  uint8_t* outPath) {
+  if (!flight1 || !flight2 || !outPath) return -1;
+  if (leafIndex < 0 || leafIndex >= PET_MERKLE_LEAVES) return -1;
+  buildTree(flight1, flight2);
+  int base = 0, width = PET_MERKLE_LEAVES, idx = leafIndex;
+  for (int d = 0; d < PET_MERKLE_DEPTH; ++d) {
+    const int sib = idx ^ 1;
+    for (int i = 0; i < HASH_BYTES; ++i)
+      outPath[d * HASH_BYTES + i] = g_tree[base + sib][i];
+    base += width;
+    width /= 2;
+    idx >>= 1;
+  }
+  return 0;
+}
+
+int petMerkleVerify(int leafIndex, const uint8_t leaf[32], const uint8_t* path,
+                    const uint8_t root[HASH_BYTES]) {
+  if (!leaf || !path || !root) return -1;
+  if (leafIndex < 0 || leafIndex >= PET_MERKLE_LEAVES) return -1;
+  uint8_t acc[HASH_BYTES];
+  merkleLeaf(leafIndex, leaf, acc);
+  int idx = leafIndex;
+  for (int d = 0; d < PET_MERKLE_DEPTH; ++d) {
+    const uint8_t* sib = path + d * HASH_BYTES;
+    uint8_t next[HASH_BYTES];
+    if ((idx & 1) == 0) merkleNode(acc, sib, next);
+    else                merkleNode(sib, acc, next);
+    for (int i = 0; i < HASH_BYTES; ++i) acc[i] = next[i];
+    idx >>= 1;
+  }
+  return cmp32(acc, root) == 0 ? 1 : 0;
 }
 
 }  // namespace fow

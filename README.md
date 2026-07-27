@@ -94,7 +94,9 @@ convicted on someone's claim about what their sighting test said. Instead:
 - every byte a party should send is a pure function of a seed it is already committed to
   reveal at the endgame, so an audit can recompute the honest transcript after the fact;
 - `petFlightHash` binds a party to the bytes it actually sent (it goes in the party's own
-  signed move), so a poisoned flight is attributable rather than deniable;
+  signed move), so a poisoned flight is attributable rather than deniable. It is a Merkle
+  root over the flight, not a flat hash, so a dispute proves ONE element with an 8-step
+  path instead of shipping all 129: about 350 bytes on the wire rather than 4.2 kB;
 - convictions come from recomputing the public relation over positions fixed by
   commitments made *before* the round's information existed.
 

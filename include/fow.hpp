@@ -94,11 +94,53 @@ int petRespond(const uint8_t seed[HASH_BYTES], uint16_t round,
 int petFinish(const uint8_t seed[HASH_BYTES], uint16_t round,
               const uint8_t* theirS, const uint8_t theirR[32]);
 
-// SHA256("DCHV" || flight1 || flight2): the value a party publishes to bind itself
-// to the bytes it actually sent, so a poisoned flight is attributable after the
-// fact rather than deniable. Covering flight 2 is not optional, because returning a
-// doctored R flips a peer's bit without touching the set.
+// ---------------------------------------------------------------------------
+// Binding a party to the sighting bytes it really sent
+// ---------------------------------------------------------------------------
+//
+// The value a party publishes is a MERKLE ROOT over its own flight, not
+// a flat hash of it. Both bind the sender equally, since the surrounding protocol
+// signs the message that carries it, but the root also lets a dispute prove ONE
+// element without shipping the other 129. That is the difference between a 350-byte dispute and a 4.2 kB one,
+// on chain and in state, and disputes are the only path that ever pays it.
+//
+// BOTH flights are covered, and the flight-2 half is not padding. Poisoning the SET is
+// only one of the two ways to flip a peer's bit. Answering with a doctored R works
+// too, and needs no guess about the peer's position, so a commitment over the set
+// alone would leave the cheaper attack unattributable.
+//
+// LEAF LAYOUT, which is wire contract:
+//   0 .. PET_PAD-1   the blinded set S, in its canonical sorted order
+//   PET_PAD          Q, the sender's own blinded element
+//   PET_PAD+1        R, the flight-2 response
+//   the rest         zero padding, up to PET_MERKLE_LEAVES
+//
+// Leaves and interior nodes are domain-separated by a 0x00 / 0x01 prefix byte so a
+// node can never be reinterpreted as a leaf (the standard second-preimage defence),
+// and the leaf index is inside the leaf preimage so an element cannot be moved to a
+// different slot.
+constexpr int PET_MERKLE_DEPTH = 8;                       // 2^8 = 256 >= 130 leaves
+constexpr int PET_MERKLE_LEAVES = 1 << PET_MERKLE_DEPTH;
+constexpr int PET_MERKLE_PATH_BYTES = PET_MERKLE_DEPTH * HASH_BYTES;
+constexpr int PET_LEAF_Q = PET_PAD;                       // index of Q
+constexpr int PET_LEAF_R = PET_PAD + 1;                   // index of R
+constexpr int PET_LEAVES_USED = PET_PAD + 2;
+
+// The root. flight1 is PET_BUILD_BYTES (S then Q); flight2 is the 32-byte response.
 void petFlightHash(const uint8_t* flight1, const uint8_t flight2[32],
                    uint8_t out[HASH_BYTES]);
+
+// The sibling path for one leaf, bottom level first: PET_MERKLE_PATH_BYTES bytes.
+// Returns 0, or -1 on a bad index or a null argument. Only the prover needs this; a
+// verifier only ever checks a path.
+int petMerklePath(const uint8_t* flight1, const uint8_t flight2[32], int leafIndex,
+                  uint8_t* outPath);
+
+// Recompute the root from one leaf and its path, and compare against `root`. This is
+// the ONLY half of the tree a verifier runs, and it costs PET_MERKLE_DEPTH hashes.
+// Returns 1 if the leaf really is at that index of that root, 0 if not, -1 on a bad
+// argument. `leaf` is the 32-byte point claimed to sit at `leafIndex`.
+int petMerkleVerify(int leafIndex, const uint8_t leaf[32], const uint8_t* path,
+                    const uint8_t root[HASH_BYTES]);
 
 } // namespace fow
