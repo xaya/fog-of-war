@@ -73,7 +73,7 @@ Three details carry most of the weight:
   `P_e = H(e)·G` the discrete log of every element is public, and a receiver recovers the
   *entire* set in about `3·|universe|` scalar multiplications: take two blinded elements,
   form `{h_v⁻¹·X_i}` over all candidates `v`, and intersect. The intersection is `α·G`,
-  after which every element labels itself. The paper proves it (Proposition 1); we found a
+  after which every element labels itself. The paper states it plainly, calculation included; we found a
   live instance of it in a well-regarded reference implementation. Points whose discrete
   log nobody knows are the whole difference between blinding and encoding.
 - **Fixed-size padding.** Sets are padded to 128 entries with seed-derived dummies hashed
@@ -95,8 +95,13 @@ convicted on someone's claim about what their sighting test said. Instead:
   reveal at the endgame, so an audit can recompute the honest transcript after the fact;
 - `petFlightHash` binds a party to the bytes it actually sent (it goes in the party's own
   signed move), so a poisoned flight is attributable rather than deniable. It is a Merkle
-  root over the flight, not a flat hash, so a dispute proves ONE element with an 8-step
-  path instead of shipping all 129: about 350 bytes on the wire rather than 4.2 kB;
+  root over the flight, not a flat hash, so a verifier can check ONE supplied element
+  with an 8-step path instead of rehashing all 129. One honest caveat, learned in
+  deployment: only elements the PROVER can locate can ride a path. The accuser's claim
+  about its peer's set works that way (~290 bytes); its claim about its OWN set does not,
+  because locating the peer's element there requires the peer's still-hidden position —
+  the bit's own privacy hides which element matched — so that half of a dispute ships
+  the set whole and the referee scans, which the root has already made cheap to bind;
 - convictions come from recomputing the public relation over positions fixed by
   commitments made *before* the round's information existed.
 
@@ -156,7 +161,7 @@ diverge, `make verify` fails.
 *Fog of War without Zero-Knowledge Proofs: A Blinded Mutual-Sighting Test for Trustless
 Game Channels* is in [`paper/blinded-sighting-test.pdf`](paper/blinded-sighting-test.pdf).
 It carries the protocol with a correctness theorem, the security analysis (including
-Proposition 1 above), the fuel measurements, and the related work.
+the known-discrete-log break above), and the related work.
 
 ## Prior art, and what is ours
 
@@ -186,7 +191,7 @@ Game channels, the setting all of this lives in, are due to Daniel Kraft:
 
 ## Authors
 
-Xaya Developers: Daniel Kraft, Andrew Colosimo, Konstantin Gorskov, Roy Crombleholme,
-Andrew Gore, and Johnv5 AI Agent.
+Xaya Developers: Andrew Colosimo, Roy Crombleholme, Andrew Gore, Konstantin Gorskov,
+and Daniel Kraft.
 
 MIT licensed.
