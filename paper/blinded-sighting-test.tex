@@ -25,7 +25,7 @@ A Blinded Mutual-Sighting Test for Trustless Game Channels}
 Konstantin Gorskov \quad Daniel Kraft\\[6pt]
 \normalsize Xaya Developers}
 
-\date{July 27, 2026}
+\date{July 28, 2026}
 
 \begin{document}
 \maketitle
@@ -50,7 +50,10 @@ exchange itself: cheating is adjudicated by recomputing the public sight
 predicate over positions fixed by commitments made before the round's
 information existed. Together these replace an in-round zero-knowledge proof,
 which does not fit the execution budget of our referee, with after-the-fact
-attribution, at essentially no consensus cost on the honest path.
+attribution. On the honest path the referee performs no curve arithmetic ---
+its only in-round work is refusing a published set that does not rebuild the
+committed root, which is hashing --- and the chain is touched only to open,
+dispute and settle.
 \end{abstract}
 
 \section{Introduction}
@@ -122,9 +125,16 @@ our deployment a tile dungeon generated procedurally from a shared seed. Each
 round:
 \begin{enumerate}
 \item \textbf{Commit.} Both players publish hash commitments to their move,
-position and action, salted by a per-match secret $\seed_i$.
-\item \textbf{Sighting test.} The exchange of \S\ref{sec:protocol}, between the
-two clients only. The referee is not involved.
+position and action, salted by a per-match secret $\seed_i$. The same move
+carries a Merkle root over the flight the player is about to publish, with its
+own blinded element beside it in the clear --- the ordering \S\ref{sec:audit}
+depends on: every root is public before any flight exists on the wire.
+\item \textbf{Sighting test.} The exchange of \S\ref{sec:protocol}, run as a
+pass of its own: each player publishes its blinded set and its responses as
+signed channel moves, and the referee refuses a published set that does not
+rebuild the root committed in step 1. Responses are computed from the peer's
+committed element read out of the published state, so no message is delivered
+outside the channel.
 \item \textbf{Disclose.} If the test said \emph{no}, a player publishes nothing
 about its position. If it said \emph{yes}, both players are obliged to publish
 their exact positions for the round, with an arrival proof, and on first contact
@@ -377,7 +387,9 @@ and it must be re-derived for any other setting.
 \paragraph{What the exchange deliberately does not provide.}
 First, no in-round proof that $V$ was computed from the committed position: a
 malicious party can feed any set or $Q$ it likes, and the surrounding system
-makes this pointless or attributable rather than impossible (\S\ref{sec:audit}).
+makes this pointless or attributable rather than impossible
+(\S\ref{sec:audit}) --- with one bounded exception, an over-reported set,
+recorded honestly in \S\ref{sec:limits}.
 Second, no fairness or liveness: a party can stall mid-exchange, and the
 channel's existing timeout forfeits cover it. Third, it requires the predicate to
 be symmetric (\S\ref{sec:predicate}).
@@ -385,8 +397,12 @@ be symmetric (\S\ref{sec:predicate}).
 \section{Attribution instead of zero-knowledge}
 \label{sec:audit}
 
-The referee never verifies the exchange in-round, so the honest path costs
-consensus nothing. Three facts combine into the enforcement story.
+In-round, the referee performs no curve arithmetic over the exchange: its one
+check is that a published set rebuilds the committed root, which is hashing,
+and the correctness of the exchange's \emph{content} is never judged before a
+dispute. The honest path therefore never touches the chain --- a channel
+consults it only to open, dispute and settle. Three facts combine into the
+enforcement story.
 
 \begin{enumerate}
 \item \textbf{The honest transcript is a pure function.} By
@@ -399,13 +415,19 @@ forces both players to reveal $\seed_i$ and their full paths, verified against
 every round's hash commitments. Any judge can therefore recompute, after the
 fact, the exact bytes an honest party would have sent in any round, and compare
 them with what was sent. Each party publishes a commitment to the flight it sent
-inside its own signed move, which makes a wrong byte non-repudiable. The
-recomputation must be of a \emph{single named element} rather than of a whole
-flight: rebuilding a flight inside the referee is orders of magnitude beyond its
-per-call budget, whereas verifying a supplied element against the committed
-flight and recomputing that one element is cheap. Using the commitment the sender
-already publishes, rather than a signature scheme inside the blob, is what keeps
-this affordable.
+inside its own signed move, which makes a wrong byte non-repudiable. What the
+judge may never do is \emph{regenerate} an honest flight from the seed --- a
+hundred-odd curve derivations, orders of magnitude beyond its per-call budget
+--- so each check works from supplied or published bytes instead. On the
+accused's side that is one Merkle-authenticated element of the committed set,
+recomputed and verified in a handful of hashes. On the disputer's side a single
+named element is not even possible: a dark opponent's position is revealed only
+by the audit itself, after the evidence is frozen, and the test's own privacy
+hides \emph{which} element matched --- so the disputer files its whole set, the
+referee refuses the filing unless it rebuilds the committed root, and the judge
+then locates the element itself by scanning bytes that are already bound.
+Using the commitment the sender already publishes, rather than a signature
+scheme inside the blob, is what keeps all of this affordable.
 \item \textbf{Convictions never trust the bit.} ``In sight and stayed dark'' and
 ``disputed a sighting that was not there'' are both adjudicated by recomputing
 $\sight$, Eq.~\eqref{eq:sight}, over positions bound by commitments made before
@@ -559,11 +581,21 @@ general hash-to-curve framework.
 \begin{enumerate}
 \item \textbf{Attribution is deterrence, not prevention.} A participant who
 fabricates a flight learns the answer it wanted before the audit convicts it, so
-the stake must exceed the value of the information. At more than two participants
+the stake must exceed the value of the information --- and conviction runs only
+inside a dispute's adjudication, so the bound applies to fabrications that must
+surface in one. At more than two participants
 a dispute is also terminal for the whole table rather than for the pair: the
 audit it forces reveals every participant's seed, and revealed seeds cannot
 continue a hidden-information game, so the match settles on its merits --- the
 same property the demand-an-immediate-end move has by design.
+\item \textbf{An over-reported set is a bounded, conditionally priced probe.}
+A participant may pad its published set with positions it cannot see, up to the
+fixed pad size per round, forcing an exposure from whoever it guesses right
+about. Padding is provable after the fact from the revealed seed, and a phantom
+``yes'' hands its victim a \emph{winning} dispute --- the adjudication's
+poisoning arm convicts the padder from its own committed bytes --- but the
+victim must choose to spend that dispute, and no deployed rule prices the probe
+when it does not. Pricing it unconditionally is future work.
 \item \textbf{A one-round rotation edge.} A suppressor whose disclosure happens
 to be ordered after the honest player's can dodge a dispute for a single round of
 fleeting edge-of-range contact.
