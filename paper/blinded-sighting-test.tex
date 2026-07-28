@@ -559,16 +559,20 @@ general hash-to-curve framework.
 \begin{enumerate}
 \item \textbf{Attribution is deterrence, not prevention.} A participant who
 fabricates a flight learns the answer it wanted before the audit convicts it, so
-the stake must exceed the value of the information; and the referee refuses
-disputes above two participants, because one published response per disclosure
-identifies its peer unambiguously only for a single pair. Lifting that bound is a
-per-peer commitment over the responses rather than a different adjudication, and
-refusing the feature is preferable to convicting the wrong participant.
+the stake must exceed the value of the information. At more than two participants
+a dispute is also terminal for the whole table rather than for the pair: the
+audit it forces reveals every participant's seed, and revealed seeds cannot
+continue a hidden-information game, so the match settles on its merits --- the
+same property the demand-an-immediate-end move has by design.
 \item \textbf{A one-round rotation edge.} A suppressor whose disclosure happens
 to be ordered after the honest player's can dodge a dispute for a single round of
 fleeting edge-of-range contact.
-\item \textbf{Two seats measured.} The exchange generalises pairwise, at cost
-linear in the number of pairs, but our measurements are two-seat.
+\item \textbf{Privacy measured pairwise.} The deployed implementation runs the
+exchange at up to four participants --- each round every participant publishes
+one response per peer, and the dispute adjudication names its pair explicitly ---
+at per-round cost linear in the number of pairs. The anonymity-set measurements
+of \S\ref{sec:security}, however, are two-participant; more observers can only
+shrink the hider's candidate set, and we have not yet quantified by how much.
 \item \textbf{Cost.} The per-round curve arithmetic is a fraction of a
 turn-based beat and roughly halves with precomputation of the fixed elements of
 \eqref{eq:tilepoint} and \eqref{eq:dummy}, which is why those derivations are
