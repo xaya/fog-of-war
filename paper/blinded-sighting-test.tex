@@ -16,6 +16,9 @@
 \newcommand{\HtoC}{\mathsf{H2C}}
 \newcommand{\sha}{\mathrm{SHA\text{-}256}}
 \newcommand{\seed}{\mathrm{seed}}
+\newcommand{\pseed}{\seed^{\mathrm{path}}}
+\newcommand{\petseed}{\seed^{\mathrm{pet}}}
+\newcommand{\master}{\mathrm{master}}
 \newcommand{\concat}{\,\|\,}
 
 \title{Fog of War without Zero-Knowledge Proofs:\\
@@ -25,7 +28,7 @@ A Blinded Mutual-Sighting Test for Trustless Game Channels}
 Konstantin Gorskov \quad Daniel Kraft\\[6pt]
 \normalsize Xaya Developers}
 
-\date{July 28, 2026}
+\date{July 31, 2026}
 
 \begin{document}
 \maketitle
@@ -41,19 +44,27 @@ hash-committed their moves for a round, and before either move is disclosed, the
 two clients run a Diffie--Hellman-blinded private membership test, the
 Meadows~1986 and Huberman--Franklin--Hogg~1999 lineage cut down from set
 intersection to a single membership bit evaluated in both directions. Both
-parties learn exactly one shared bit, ``we are in sight'', and nothing else. Two
-design choices adapt the classical protocol to a consensus setting. First, every
-blinding scalar and pad element is derived deterministically from a seed the
-player is already bound to reveal, which makes the entire honest transcript
-recomputable by an after-the-fact audit. Second, no conviction ever trusts the
+parties learn exactly one shared bit, ``we are in sight'', and nothing else.
+Three design choices adapt the classical protocol to a consensus setting.
+First, every blinding scalar and pad element is derived deterministically from
+per-epoch secrets the player is already bound to reveal, which makes the honest
+transcript recomputable by an after-the-fact audit --- and any reveal that
+publishes a secret closes its epoch on the spot: the referee restarts the
+player's commitment chains and the client re-seeds behind them, so a disclosed
+secret never governs a live round. Second, no conviction ever trusts the
 exchange itself: cheating is adjudicated by recomputing the public sight
 predicate over positions fixed by commitments made before the round's
-information existed. Together these replace an in-round zero-knowledge proof,
-which does not fit the execution budget of our referee, with after-the-fact
-attribution. On the honest path the referee performs no curve arithmetic ---
-its only in-round work is refusing a published set that does not rebuild the
-committed root, which is hashing --- and the chain is touched only to open,
-dispute and settle.
+information existed. Third, the blinded query element each round publishes is
+bound, retroactively, to the position committed beside it --- one sampled curve
+check at the audit, plus a pay-on-accusation dispute over sealed epochs ---
+pricing, at audit strength, the chosen-element oracle that unbound
+private-membership exchanges leave open. Together these replace an in-round
+zero-knowledge proof, which does not fit the execution budget of our referee,
+with after-the-fact attribution. On the honest path the referee performs no
+curve arithmetic --- its in-round work is refusing a published set that does
+not rebuild the committed root, which is hashing; audits and disputes each buy
+a fixed, measured handful of curve operations --- and the chain is touched only
+to open, dispute and settle.
 \end{abstract}
 
 \section{Introduction}
@@ -97,14 +108,24 @@ construction is the classical Diffie--Hellman private-matching protocol of
 Meadows and of Huberman, Franklin and Hogg~\cite{meadows86,hfh99}, specialised
 from set$\,\cap\,$set to membership of a single element.
 \item A \emph{determinism-for-auditability} discipline (\S\ref{sec:audit}): every
-byte a party should send is a pure function of a seed it is already committed to
-reveal, so a judge can recompute any disputed transcript after the fact. This
+byte a party should send is a pure function of secrets it is already committed to
+reveal, scoped to an \emph{epoch} that any reveal terminates
+(\S\ref{sec:epochs}), so a judge can recompute any disputed transcript after the
+fact and no reveal ever un-blinds a live round. This
 converts ``prove your input was honest'', which is a proof system's job, into
 ``lying is non-repudiable evidence'', at negligible consensus cost.
 \item \emph{Enforcement by geometry, not cryptography} (\S\ref{sec:audit}): no
 conviction ever depends on the exchange. Suppressing a sighting, and disputing a
 phantom one, are both adjudicated by recomputing the public sight predicate over
 positions bound by hash commitments made before the round's information existed.
+\item A \emph{binding for the blinded query element} (\S\ref{sec:qbind}): the one
+input the exchange cannot validate in-round --- a responder able to tell what it
+is being asked would defeat the instrument --- is made retroactively checkable
+against the committed position instead, by a sampled check at the audit and a
+dispute over sealed epochs in which every well-formed filing convicts one of
+its two parties (a malformed filing is refused without a verdict). We measured
+the oracle this prices and found it decisive rather than marginal
+(\S\ref{sec:oracle}).
 \end{enumerate}
 
 \section{Setting and threat model}
@@ -125,10 +146,13 @@ our deployment a tile dungeon generated procedurally from a shared seed. Each
 round:
 \begin{enumerate}
 \item \textbf{Commit.} Both players publish hash commitments to their move,
-position and action, salted by a per-match secret $\seed_i$. The same move
+position and action, salted from a per-epoch path secret (\S\ref{sec:derive}).
+The same move
 carries a Merkle root over the flight the player is about to publish, with its
 own blinded element beside it in the clear --- the ordering \S\ref{sec:audit}
-depends on: every root is public before any flight exists on the wire.
+depends on: every root is public before any flight exists on the wire. The
+referee also appends that blinded element to an append-only Merkle frontier
+carried in the player's state, the retention behind \S\ref{sec:qbind}.
 \item \textbf{Sighting test.} The exchange of \S\ref{sec:protocol}, run as a
 pass of its own: each player publishes its blinded set and its responses as
 signed channel moves, and the referee refuses a published set that does not
@@ -137,18 +161,28 @@ committed element read out of the published state, so no message is delivered
 outside the channel.
 \item \textbf{Disclose.} If the test said \emph{no}, a player publishes nothing
 about its position. If it said \emph{yes}, both players are obliged to publish
-their exact positions for the round, with an arrival proof, and on first contact
-the connecting path.
+their exact positions for the round, with an arrival proof, and on entering
+contact the path connecting the position to the player's last judged one.
 \end{enumerate}
-Every match ends with an \textbf{endgame audit}: both players reveal $\seed_i$
-and their full paths, which the blob verifies against every round's commitments
-and replays against the map. This audit predates the sighting test;
-\S\ref{sec:audit} extends it.
+Not every ending runs an audit. A match decided during play finishes on the
+spot: by a kill (combat is legal only in contact, entering which
+requires a verified full-path proof, so the fight's participants already stand
+audited), by a forfeit, or by a conviction that leaves one player standing. The
+round cap, and any player
+demanding it, close instead with an \textbf{endgame audit}: each player reveals its
+current secrets and its path back to its last \emph{epoch boundary}
+(\S\ref{sec:epochs}), which the blob verifies against those rounds' commitments
+and replays against the map. Rounds before a boundary were verified identically
+at the moment their epoch closed, and the closure is pinned into the state by
+preimage: no round of movement is verified twice, and none that a verdict leans
+on escapes verification. Mid-match reveals --- first contact, dispute
+evidence --- are epoch boundaries rather than exceptional events. The audit
+predates the sighting test; \S\ref{sec:audit} extends it.
 
 \paragraph{Adversary.} A malicious client controls all of its own messages: it
 may send arbitrary bytes in the sighting exchange, stall, or disclose falsely. It
-cannot break hash commitments or signatures, and it cannot avoid the endgame
-audit except by forfeiting, since timeouts convert stalling into forfeit. Both
+cannot break hash commitments or signatures, and it cannot dodge an audit once
+one is owed except by forfeiting, since timeouts convert stalling into forfeit. Both
 players' clients may be malicious simultaneously; the game between two colluding
 cheaters is not our concern, but neither cheater may gain against an honest
 opponent. The design rule throughout: \emph{consensus never trusts a claim}, and
@@ -197,7 +231,12 @@ RSA-style multiplicative blinding; nothing below depends on the choice.
 \item \textbf{Hardness.} Distinguishing $\{\alpha P_t : t \in T_0\}$ from
 $\{\alpha P_t : t \in T_1\}$ for candidate sets $T_0, T_1$, given the public
 $P_t$, must be hard. In a prime-order elliptic-curve group this is a standard
-decisional Diffie--Hellman problem.
+decisional Diffie--Hellman problem --- for a passive observer of the
+transcript. A \emph{responding} participant additionally obtains one blinded
+evaluation $\alpha Q$ per round for a $Q$ it supplies, a one-query oracle for
+$x \mapsto \alpha\,\HtoC(x)$, so claims against a receiver rest on assumptions
+of the one-more or gap Diffie--Hellman kind~\cite{jl09,jl10};
+\S\ref{sec:security} scopes which claim rests on which.
 \item \textbf{Elements with unknown discrete logarithms.} The map
 $t \mapsto P_t$ from a game position to a group element must be a hash-to-group
 map whose outputs have discrete logarithms unknown to everyone, including the
@@ -229,24 +268,115 @@ requirement and not an implementation detail:
 & P_t = \HtoC\bigl(\mathtt{"T"} \concat \mathrm{enc}(t)\bigr),
 \label{eq:tilepoint}\\[2pt]
 \text{blinding scalar of player $i$, round $r$:}\quad
-& \alpha_r^{(i)} = \sha\bigl(\mathtt{"P"} \concat \seed_i \concat \mathrm{enc}(r)\bigr),
+& \alpha_r^{(i)} = \sha\bigl(\mathtt{"P"} \concat \petseed_i \concat \mathrm{enc}(r)\bigr),
 \label{eq:alpha}\\[2pt]
-\text{pad dummies of player $i$:}\quad
-& D_j^{(i)} = \HtoC\bigl(\mathtt{"D"} \concat \seed_i \concat \mathrm{enc}(j)\bigr),
-\quad j = |V|,\dots,N-1,
+\text{pad dummies of player $i$, round $r$:}\quad
+& D_{r,j}^{(i)} = \HtoC\bigl(\mathtt{"D"} \concat \petseed_i \concat \mathrm{enc}(r) \concat \mathrm{enc}(j)\bigr),
 \label{eq:dummy}
 \end{align}
-with distinct domain-separation tags, and with $\alpha$ reduced into the scalar
-range and the measure-zero zero case patched deterministically. The dummies of
-\eqref{eq:dummy} are intentionally round-independent: per-round freshness comes
-entirely from $\alpha_r$, and fixed base elements let a client precompute every
-group element it will ever hash, which is the expensive half of the per-round
-cost.
+with distinct domain-separation tags, the pad index running
+$j = |V|,\dots,N-1$, and with $\alpha$ reduced into the scalar
+range and the measure-zero zero case patched deterministically. Here
+$\petseed_i$ is one half of a split pair of secrets, defined next.
 
-Crucially, $\seed_i$ is the same secret that already salts player $i$'s move
-commitments and that is revealed in full at the endgame audit. That reuse is the
-design: it makes the honest transcript a pure function of data the player is
-already bound to expose.
+The dummies of \eqref{eq:dummy} are deliberately \emph{round-dependent}, and we
+know the property is load-bearing because an earlier revision lacked it. A
+dispute filing publishes that round's $\alpha_r$ by design (\S\ref{sec:audit}),
+and $\alpha_r$ is invertible modulo the group order, so an observer can divide
+the filing round's published set by it and recover the raw pad elements. For the
+filing round itself this is harmless --- a filing publishes the filer's exact
+position anyway, which dominates $|V|$ --- but pad elements fixed per seed would
+remain in service in every later round, recognisable there through the
+chosen-element channel of \S\ref{sec:oracle}: each recovered element, replayed
+as a query, yields a threshold bit about the current $|V|$ (the pad fills the
+slots above $|V|$, so ``still in use'' bounds it by that element's index) ---
+and with a fixed pad it would keep yielding that bit in every later round, a
+standing oracle handle --- $|V|$ being the one quantity the fixed-size pad
+exists to hide.
+Folding the round into the
+derivation confines any recovery to the round already disclosed. The cost is
+that only the position elements of \eqref{eq:tilepoint} can be precomputed; the
+pad is re-derived each round, the same $N$ hash-to-group maps the budget already
+prices.
+
+\paragraph{The two-secret split.} The secrets are two, and the distinction is
+load-bearing. Player $i$ holds one master secret and derives
+\begin{equation}
+\pseed_i = \sha\bigl(\mathtt{"A"} \concat \master_i\bigr),
+\qquad
+\petseed_i = \sha\bigl(\mathtt{"B"} \concat \master_i\bigr),
+\label{eq:split}
+\end{equation}
+the first salting every move commitment, the second --- the \emph{PET seed},
+after the private equality test at the exchange's core --- feeding
+\eqref{eq:alpha} and \eqref{eq:dummy} and nothing else. A full-path reveal
+publishes both: the path seed, which is what the movement audit needs, and the
+PET seed of the epoch that same transition closes --- the mint of
+\S\ref{sec:epochs} is the transition's final step, so a disclosed PET seed
+never governs a round still to be played. (The only reveal that carries no PET
+seed is the empty one from a player whose restart was minted that very round.)
+The one scalar a dispute's adjudication needs rides the filing itself,
+unproven, and is pinned there by the adjudication's own equalities
+(\S\ref{sec:audit}). Both sub-seeds are hash images, so publishing them reveals
+nothing about the master and hence nothing about any later epoch. The reuse
+claim above survives in scoped form: the honest transcript of an epoch is a
+pure function of that epoch's two seeds, the committed positions and the public
+map, and the player is bound to expose exactly those, in the reveal that ends
+the epoch.
+
+An earlier revision derived salts and blinding scalars from one seed, and the
+coupling was a live defect rather than a stylistic blemish: the protocol's own
+disclosure rule forces a full-path reveal at first contact, mid-match, after
+which the one published seed made every past and future $\alpha_r$ computable
+--- the player's published $Q_r$ then decodes to its exact tile by testing the
+few thousand candidates, every remaining round. The split, with the epoch
+machinery below, is what makes the privacy claims of \S\ref{sec:security} true
+as stated rather than true only until first contact.
+
+\subsection{Epochs: a published secret is a spent secret}
+\label{sec:epochs}
+
+Full-path reveals are not confined to the endgame. The disclosure rules force
+one at first contact --- a player entering contact without a standing
+proof must ship the connecting path, verified in that same call --- and a
+sight dispute's filing always carries one as its evidence, even from a filer
+already proven, because the adjudication anchors on the filer's judge-verified
+tile for the disputed round. (The sealed-epoch dispute of \S\ref{sec:qbind}
+carries none --- its evidence is entirely public --- and is not an epoch
+boundary.) Each such reveal publishes the revealer's path seed, and a published
+path seed opens every commitment it will ever salt, since a round's committed
+tile and action span under $2^{19}$ candidates. A protocol that continued
+play under a published seed would play the rest of the match face-up.
+
+The referee therefore \emph{mints a restart} as the final step of any transition
+that accepts a full-path reveal from a living player in an unfinished match. The
+mint folds each of the player's commitment-chain heads into a fresh one with the
+old head inside the preimage, so the verified prefix stays pinned and a restart
+can never shed history; it records the just-verified position as the new epoch's
+anchor, so a restart is not a licensed teleport; and the client re-seeds behind
+it,
+\begin{equation}
+\master_i' \;=\; \sha\bigl(\mathtt{"E"} \concat \master_i \concat \mathrm{enc}(R)\bigr),
+\label{eq:ratchet}
+\end{equation}
+re-deriving both sub-seeds from the new master by \eqref{eq:split}. The master
+never appears on any wire, so the ratchet moves only forward: nothing published
+in one epoch says anything about the secrets of the next.
+
+The stretch between boundaries is an \emph{epoch}, and every audit is
+epoch-relative: a reveal covers exactly the rounds since the revealer's
+boundary and anchors to the boundary's judged position. Three consequences
+matter below. A mid-match reveal costs exactly the epoch it closes --- which
+that reveal published anyway --- and nothing after it. No round is ever
+verified twice, so the total audit work over a match is linear in its length
+rather than quadratic; a single audit call still pays for the epoch it opens,
+which in the worst case is the whole match. And a dispute among
+more than two players is no longer terminal for the table: the audit pass it
+forces takes reveals only from the accused --- the filer's proof was parked at
+its filing --- convicts on the evidence, and returns the survivors to play with
+the spent epochs re-seeded. (The demand-an-immediate-end challenge move remains
+terminal by design; a challenge the match could continue past would be a
+purchasable snapshot of every player's position.)
 
 \section{The protocol}
 \label{sec:protocol}
@@ -260,7 +390,7 @@ any disclosure:
 A \to B:\quad
 S_A = \mathrm{sort}\Bigl(
 \bigl\{\, \alpha_A P_t : t \in V(a) \,\bigr\} \cup
-\bigl\{\, \alpha_A D_j^{(A)} : j = |V(a)|,\dots,N-1 \,\bigr\}
+\bigl\{\, \alpha_A D_{r,j}^{(A)} : j = |V(a)|,\dots,N-1 \,\bigr\}
 \Bigr),
 \qquad
 Q_A = \alpha_A P_a,
@@ -323,10 +453,19 @@ cannot silently diverge.
 
 The designed leakage is the bit, and, by padding, nothing about $|V|$.
 
-\paragraph{The blinded set hides its contents.}
-Recovering anything about $V(a)$ from $S_A$ is the distinguishing problem of
-\S\ref{sec:prelim}, requirement~2. The receiver holds nothing else involving
-$\alpha_A$.
+\paragraph{The blinded set hides its contents --- stated with its hypothesis.}
+Recovering anything about $V(a)$ from $S_A$ alone is the distinguishing problem
+of \S\ref{sec:prelim}, requirement~2. The receiver, however, holds more than
+$S_A$: it holds $Q_A = \alpha_A P_a$, and the response $\alpha_A Q_B$ hands it
+one evaluation of $x \mapsto \alpha_A\,\HtoC(x)$ per round at a point of its
+choice --- for a protocol-following receiver that point is its own committed
+tile, which is exactly what \eqref{eq:finish} consumes. Set privacy against a
+receiver is therefore a one-more/gap Diffie--Hellman-style claim
+(\S\ref{sec:prelim}): the one evaluation tells the receiver whether its queried
+point lies in the set, by design, and must help with nothing else. A receiver
+that \emph{deviates} spends the same one query on an arbitrary point instead;
+\S\ref{sec:oracle} measures what that is worth, and \S\ref{sec:qbind} is what
+the deployed system does about it.
 
 \paragraph{Unknown discrete logarithms are load-bearing.}
 The blinding must be by a secret factor \emph{and} the elements being blinded
@@ -352,10 +491,14 @@ hash-to-group map is not a stylistic detail.
 \end{remark}
 
 \paragraph{Cross-round unlinkability.}
-$\alpha_r$ is fresh per round, so linking $\alpha_r P_t$ to $\alpha_{r+1} P_t$,
-a stationary player, is again a Diffie--Hellman distinguishing problem. The
-dummies being fixed per seed changes nothing, since they are reblinded like every
-position.
+$\alpha_r$ is fresh per round and derived from a secret that leaves the client
+only after the epoch it governs is closed (\S\ref{sec:epochs}), so linking
+$\alpha_r P_t$ to $\alpha_{r+1} P_t$, a stationary player, is again a
+Diffie--Hellman distinguishing problem for an observer of the honest
+transcript. The pad dummies are re-derived each round for exactly this reason:
+elements recurring across rounds would become a linkable tag the moment any one
+round's scalar went public, and a dispute filing publishes one scalar by design
+(\S\ref{sec:derive}).
 
 \paragraph{Reflection and replay.}
 $B$ may echo one of $A$'s own set elements back as its $Q_B$, giving
@@ -373,6 +516,51 @@ scalar's full width, and useless against the distinguishing problem. The reply
 never matches a cofactor-cleared set element, so the resulting bit is 0. Like
 every malformed flight this is self-sabotage now and evidence later.
 
+\subsection{The chosen-element oracle, and what it is worth}
+\label{sec:oracle}
+
+The deviation above deserves stating as an attack, because we measured it and
+the measurement moved us. A responder cannot validate the query element --- a
+responder able to tell what it is being asked would defeat the instrument ---
+so a malicious player may aim its round's $Q$ at \emph{any} tile $t$: submit
+$Q = P_t$, read the peer's response $\alpha_B P_t$, and test it for membership
+of the peer's published set. Sight is symmetric, so the answer is ``are you
+standing within sight of $t$'' --- a locator query about a place the asker is
+nowhere near, answered truthfully by every peer, claiming nothing and filing
+nothing.
+
+Two prices attach to it even without the binding of \S\ref{sec:qbind}. The
+asker forfeits its own warning for the round --- its instrument answers about
+$t$, not about itself --- and none of the disclosure obligations move with the
+question, so an asker genuinely in sight of its victim is convicted for staying
+dark exactly like a deliberate suppressor. It is tempting to scope the leak by
+those prices and by its rate limit of one bit per peer per round, and an
+earlier internal review of this paper did. Simulation says otherwise: an
+attacker that probes only when its belief set \emph{proves} no opponent can see
+it takes zero conviction risk and still cuts a walking hider's median candidate
+set from several hundred tiles (seventy-five for an objective-running policy)
+to roughly ten, pinning it inside ten tiles on 49--71\% of rounds where an
+honest hunter manages 16--26\%; only a sprinting policy, which also probes
+least (a third of its rounds, against 39--78\% for the walking policies), keeps
+its cover in the hundreds. One \emph{optimally chosen} bit per round keeps
+pace with a one-step-per-round target indefinitely --- the fixed point of
+dilate-then-halve at one step a round is a sixteen-tile candidate set, and the
+simulated medians (8--11) sit at that order of magnitude; the same arithmetic
+gives 64 tiles at two steps a round, which is the regime the mode-hiding below
+forces. The lesson we record: counting a leak's bits
+per round is not the same as simulating an adversary that spends them well.
+
+The deployed response is two-fold. First, the wire no longer publishes the
+declared movement mode below contact, so the attacker must dilate its belief
+set by the maximum step count every round; the measured pinning rate collapses
+from the 49--71\% above to under 7\% --- still a leak, no longer an
+operationally decisive one. (The same zero-risk attacker, retooled for the
+mode-hidden wire, probes on 28--87\% of its rounds --- the fraction the sampled
+check of \S\ref{sec:qbind} prices.) Second, the query element is bound, retroactively
+and at audit strength, to the committed position (\S\ref{sec:qbind}), which
+turns the oracle from an unattributable capability into a self-incriminating
+one. Neither is an in-round proof, and \S\ref{sec:limits} states the residue.
+
 \paragraph{The accumulated-negative leak.}
 Every ``no'' round tells a player that the opponent is outside its visible set,
 and these constraints accumulate. This is the designed privacy and liveness
@@ -385,10 +573,11 @@ of a particular map, sight range and movement speed rather than of the protocol,
 and it must be re-derived for any other setting.
 
 \paragraph{What the exchange deliberately does not provide.}
-First, no in-round proof that $V$ was computed from the committed position: a
-malicious party can feed any set or $Q$ it likes, and the surrounding system
-makes this pointless or attributable rather than impossible
-(\S\ref{sec:audit}) --- with one bounded exception, an over-reported set,
+First, no in-round proof that $V$ or $Q$ was computed from the committed
+position: a malicious party can feed any set or $Q$ it likes, and the
+surrounding system makes this pointless or attributable rather than impossible
+(\S\ref{sec:audit}, \S\ref{sec:qbind}) --- with two bounded residues, an
+over-reported set and the window before a chosen element's epoch is audited,
 recorded honestly in \S\ref{sec:limits}.
 Second, no fairness or liveness: a party can stall mid-exchange, and the
 channel's existing timeout forfeits cover it. Third, it requires the predicate to
@@ -399,28 +588,40 @@ be symmetric (\S\ref{sec:predicate}).
 
 In-round, the referee performs no curve arithmetic over the exchange: its one
 check is that a published set rebuilds the committed root, which is hashing,
-and the correctness of the exchange's \emph{content} is never judged before a
-dispute. The honest path therefore never touches the chain --- a channel
-consults it only to open, dispute and settle. Three facts combine into the
-enforcement story.
+and the correctness of the exchange's \emph{content} is never judged before an
+audit or a dispute --- where curve work is bought deliberately and by measure,
+one sampled check per audited epoch (\S\ref{sec:qbind}) and a fixed handful of
+multiplications per dispute. The honest path never touches the chain --- a
+channel consults it only to open, dispute and settle. Three facts combine into
+the enforcement story.
 
 \begin{enumerate}
 \item \textbf{The honest transcript is a pure function.} By
 \S\ref{sec:derive}, every byte party $i$ should send in round $r$ is
-$T(\seed_i, r, \mathrm{position}_i(r), \mathrm{map})$: the scalar from the seed,
-$V$ from the committed position and the public map, position elements and dummies
-from fixed derivations, and the order fixed by the sort.
+$T(\pseed_i, \petseed_i, r, \mathrm{position}_i(r), \mathrm{map})$, the seeds
+those of the epoch containing $r$ (\S\ref{sec:epochs}): the scalar and the pad
+from the PET seed, $V$ from the committed position and the public map, the
+commitment salts from the path seed, and the order fixed by the sort.
 \item \textbf{The audit reveals the preimages.} The pre-existing endgame audit
-forces both players to reveal $\seed_i$ and their full paths, verified against
-every round's hash commitments. Any judge can therefore recompute, after the
+forces every player to reveal its epoch secrets and its path, verified against
+those rounds' hash commitments, with closed epochs pinned by the mints that
+ended them (\S\ref{sec:epochs}). Any judge can therefore recompute, after the
 fact, the exact bytes an honest party would have sent in any round, and compare
 them with what was sent. Each party publishes a commitment to the flight it sent
 inside its own signed move, which makes a wrong byte non-repudiable. What the
 judge may never do is \emph{regenerate} an honest flight from the seed --- a
-hundred-odd curve derivations, orders of magnitude beyond its per-call budget
---- so each check works from supplied or published bytes instead. On the
-accused's side that is one Merkle-authenticated element of the committed set,
-recomputed and verified in a handful of hashes. On the disputer's side a single
+hundred-odd curve derivations, some thirty times its per-call budget
+--- so each check works from supplied or published bytes instead. The one
+secret-derived quantity the adjudication needs, the disputer's round scalar,
+rides the filing itself rather than being derived from any revealed seed; it
+arrives unproven, and safely so, because every equality it enters compares it
+against bytes its filer committed or published before the dispute existed, so a
+forged scalar convicts the filer. On the
+accused's side the evidence is one Merkle-authenticated element of the
+committed set, and the recomputation a verdict costs the judge is one
+hash-to-group map and two scalar multiplications per arm --- an amount chosen
+against the fuel budget, since a first draft that checked twice as much did not
+fit beside the audit in the same call. On the disputer's side a single
 named element is not even possible: a dark opponent's position is revealed only
 by the audit itself, after the evidence is frozen, and the test's own privacy
 hides \emph{which} element matched --- so the disputer files its whole set, the
@@ -438,8 +639,8 @@ obliged to act; the map convicts.
 So a proof system's job, \emph{prove your input was honest}, is replaced by
 \emph{your input is a deterministic function of things you are already bound to
 reveal, and lying about it is signed evidence}. The guarantee is delivered after
-the fact instead of in-round, which a turn-based channel game with a mandatory
-endgame audit can afford, and the consensus-side cost is essentially zero.
+the fact instead of in-round, which a turn-based channel game can afford when
+any player can force the audit, and the consensus-side cost is essentially zero.
 
 \paragraph{The trust boundary, stated plainly.}
 Attribution closes a gap that is open in both directions. A malicious opponent who
@@ -455,7 +656,7 @@ Both close only if the commitment to the flight PRECEDES the exchange, which is 
 it rides the commitment move rather than the disclosure: the commit pass closes
 before any set is published, so every participant's root is public before any
 flight exists on the wire. The response needs no commitment of its own, since the
-audit recomputes it from the revealed seed and the peer's committed element;
+audit recomputes it from the revealed secrets and the peer's committed element;
 publishing it is what makes a doctored response attributable. What the
 adjudication then establishes, on the two positions the audit has verified, is
 which side's committed bytes contradict the geometry: whether the disputer's own
@@ -485,6 +686,77 @@ state --- so the exchange needs no delivered message anywhere --- and delivery a
 publication coincide by construction, at which point the recomputation convicts a
 doctored response exactly as it convicts a doctored set.
 
+\subsection{Binding the blinded element}
+\label{sec:qbind}
+
+One input to the exchange is not covered by the story so far. The published set
+is bound to a pre-committed root; positions are bound by hash commitments; but
+the query element $Q$ was, in the terms above, merely \emph{published} ---
+nothing tied its bytes to the tile committed beside it, and \S\ref{sec:oracle}
+measures what an attacker does with that freedom. The binding cannot be checked
+where $Q$ is used: the responder must not learn what it is being asked, and the
+referee, which could know, cannot afford curve arithmetic in every round's
+calls. So the binding is retroactive, in three parts.
+
+\emph{Retention.} Each accepted commitment appends its $Q$ to an append-only
+Merkle frontier in the player's state --- nine levels at our round cap, 288
+bytes --- maintained beside the commitment chain and reset at each epoch
+boundary.
+
+\emph{A sampled check at the audit.} An audit reveal now also carries the
+epoch's PET seed and one Merkle opening. The judge draws one round of the
+audited epoch, from a hash over the running heads of every player's commitment
+and disclosure chains, salted by an accumulator over the seeds already revealed
+in the pass;
+for any given prober those inputs are pinned by moves other players made after
+its queries were already chosen, so it can neither steer nor predict the
+draw. The judge then recomputes $\alpha_r$ from the revealed PET seed by
+\eqref{eq:alpha}, recomputes $\alpha_r P_{t_r}$ from the revealed tile, and
+verifies the opening against the frontier. A player that probed on $k$ of the
+epoch's $n$ rounds is caught with probability $k/n$ --- 28--87\% of rounds for
+the zero-risk strategies of \S\ref{sec:oracle} on the deployed wire, lowered
+only by asking less. A mismatch \emph{rejects} the reveal rather than
+convicting: nothing has pre-committed the PET seed, so a mismatch cannot be
+attributed to a dishonest $Q$ rather than to a mis-supplied seed, and a
+conviction may not hang on that ambiguity. Rejection forfeits the prober all
+the same: its committed $Q$ opens under no seed it could supply, since the
+probe point and the true tile point have no known scalar relation, so no
+spelling of its reveal passes and the timeout ejects it.
+
+\emph{Sealing, so closed epochs stay disputable.} The check above covers the
+epoch the audit opens; without more, an epoch closed mid-match would launder
+its probes. The canonical attack probes from the dark, walks into contact and
+kills --- and the contact proof's own mint closes the probing epoch, after
+which no later call holds its tiles. The mint therefore folds what it is about
+to discard --- the frontier root, a hash of the epoch's verified tiles, the
+spent PET seed, the boundary round and the round count --- into a per-player
+accumulator that is never reset; the ratchet \eqref{eq:ratchet} has already
+re-seeded behind it, so the disclosure compromises nothing after the boundary.
+From the moment the epoch-closing reveal
+publishes the spent PET seed, every opponent can verify every round of that
+epoch off the wire for free; detection is certain, and only the conviction
+needs a referee. A dedicated dispute move names one round of one closed epoch
+and ships the accused's whole sealed history. The referee re-folds the
+accumulator from zero --- a rebuild that misses the accused's standing value
+convicts the \emph{filer}, since every input is public and the rebuild
+deterministic --- then performs the one curve check at the named round,
+convicting the accused on a mismatch and the filer on a match. Every
+well-formed filing convicts somebody; a dispute that could cost nothing would
+itself be a free probe. And conviction is sound here where the audit could only
+reject, because every PET seed folded into the accumulator was sealed there by
+the accused's own judge-accepted reveal: the accused authenticated the very
+bytes that convict it.
+
+\emph{Measured, on the deployed referee.} The audit reveal with its sampled
+check is the system's worst call at 84.8\% of the per-call fuel budget; the
+mint's fold adds about 1.4\% of the budget to the call that pays it; the
+closed-epoch dispute, rebuilding a worst-case 383-round epoch and paying its
+curve check in a move of its own, runs at 40.0\%; and the retained state fits a
+four-player match in 7{,}865 of the platform's 8{,}192-byte state cap. The
+residues --- one draw per audited epoch rather than a check per round, and the
+kill-decided match that no audit pass ever reaches --- are stated in
+\S\ref{sec:limits}.
+
 \section{Related work}
 \label{sec:related}
 
@@ -493,8 +765,14 @@ The double-blinding trick at the core of \S\ref{sec:protocol} is old and good.
 Meadows~\cite{meadows86} used commutative blinding for cryptographic matchmaking
 in 1986, and Huberman, Franklin and Hogg~\cite{hfh99} used the same structure for
 private community matching in 1999. The modern literature knows it as ECDH-PSI:
-formalised and extended by Freedman, Nissim and Pinkas~\cite{fnp04} and given
-linear-complexity instantiations by De Cristofaro and Tsudik~\cite{dt10}. It runs
+Agrawal, Evfimievski and Srikant~\cite{aes03} formalised the
+commutative-encryption approach for set intersection across private databases,
+Jarecki and Liu~\cite{jl09,jl10} gave it security against malicious parties
+under one-more-Diffie--Hellman-type assumptions, and De Cristofaro and
+Tsudik~\cite{dt10} linear-complexity instantiations. (The other main PSI
+family, oblivious polynomial evaluation over homomorphic encryption, begins
+with Freedman, Nissim and Pinkas~\cite{fnp04}, who position it explicitly
+against this lineage.) It runs
 at planetary scale today, with Google's Password Checkup~\cite{checkup19} and
 Apple's PSI system~\cite{applepsi} both descendants. Our protocol is this
 classical construction \emph{reduced}: from set$\,\cap\,$set to membership of a
@@ -536,8 +814,9 @@ must never learn \emph{which} element matched and so have nothing to decrypt;
 fixed the set cardinality by padding, since otherwise $|V|$ leaks for free; and,
 most importantly, bound the inputs. Like most PSI reference implementations that
 one leaves inputs unbound, so a malicious party can use the protocol as a
-membership oracle over fabricated sets, and our committed-seed determinism and
-audit (\S\ref{sec:audit}) exist precisely to close that gap.
+membership oracle over fabricated sets and query points, and our committed-seed
+determinism, audit and query binding (\S\ref{sec:audit}, \S\ref{sec:qbind})
+exist precisely to close that gap.
 
 \paragraph{Private equality and proximity testing.}
 Comparing secrets without revealing them goes back at least to Fagin, Naor and
@@ -580,14 +859,17 @@ general hash-to-curve framework.
 
 \begin{enumerate}
 \item \textbf{Attribution is deterrence, not prevention.} A participant who
-fabricates a flight learns the answer it wanted before the audit convicts it, so
-the stake must exceed the value of the information --- and conviction runs only
-inside a dispute's adjudication, so the bound applies to fabrications that must
-surface in one. At more than two participants
-a dispute is also terminal for the whole table rather than for the pair: the
-audit it forces reveals every participant's seed, and revealed seeds cannot
-continue a hidden-information game, so the match settles on its merits --- the
-same property the demand-an-immediate-end move has by design.
+fabricates a flight learns the answer it wanted before anything convicts it, so
+the stake must exceed the value of the information. The window is bounded
+differently per input: a fabricated \emph{set} is judged only inside a dispute's
+adjudication, so its bound applies to fabrications that must surface in one,
+while a fabricated \emph{query element} meets the sampled check with the
+per-epoch probability of \S\ref{sec:qbind} and the closed-epoch dispute with
+certain detection --- but each of those lands after the epoch, never in the
+round the answer was read. Disputes are no longer terminal for the table at
+more than two participants (\S\ref{sec:epochs}); at two they still are, since
+the adjudication always convicts one of the pair. The demand-an-immediate-end
+challenge and the round-cap audit remain terminal by design.
 \item \textbf{An over-reported set is a bounded, conditionally priced probe.}
 A participant may pad its published set with positions it cannot see, up to the
 fixed pad size per round, forcing an exposure from whoever it guesses right
@@ -596,6 +878,21 @@ about. Padding is provable after the fact from the revealed seed, and a phantom
 poisoning arm convicts the padder from its own committed bytes --- but the
 victim must choose to spend that dispute, and no deployed rule prices the probe
 when it does not. Pricing it unconditionally is future work.
+\item \textbf{The query-element binding is retroactive and sampled.} Between
+commission and audit a chosen element reads its answers freely
+(\S\ref{sec:oracle}); the live check draws one round per audited epoch, so a
+sparse prober trades catch probability against questions asked; and the dispute
+needs a living filer with a disclosure pass to file in. At three or four
+players a bystander files. At two players the canonical probe-then-hunt-then-kill
+run ends the match at the kill, before any audit pass exists and with nobody
+left to file, so it convicts nobody on-chain: the killer's own final reveal
+publishes the epoch's PET seed and path, and its committed queries are already
+on the wire, so the probing is publicly verifiable by anyone --- evidence
+without a court. This dead-victim residual is the sharpest gap the binding
+leaves. An in-round well-formedness proof for $Q$ --- a zero-knowledge
+statement of $Q = \alpha_r P_{t_r}$ --- would close the oracle outright; it
+does not fit the referee's budget today, and it is the sharpest candidate for
+future work.
 \item \textbf{A one-round rotation edge.} A suppressor whose disclosure happens
 to be ordered after the honest player's can dodge a dispute for a single round of
 fleeting edge-of-range contact.
@@ -606,9 +903,11 @@ at per-round cost linear in the number of pairs. The anonymity-set measurements
 of \S\ref{sec:security}, however, are two-participant; more observers can only
 shrink the hider's candidate set, and we have not yet quantified by how much.
 \item \textbf{Cost.} The per-round curve arithmetic is a fraction of a
-turn-based beat and roughly halves with precomputation of the fixed elements of
-\eqref{eq:tilepoint} and \eqref{eq:dummy}, which is why those derivations are
-round-independent. Much shorter beats would need batching or a faster field
+turn-based beat. Precomputing the position elements of \eqref{eq:tilepoint} per
+map trims it by roughly a seventh at the median visible set (a quarter at its
+largest); the pad of \eqref{eq:dummy} cannot be precomputed, by design
+(\S\ref{sec:derive}), which is what removed the halving an earlier design
+bought here. Much shorter beats would need batching or a faster field
 implementation.
 \item \textbf{The leak is a dial, not zero.} The accumulated-negative constraint
 is inherent to guaranteed encounters, and we chose to measure the resulting
@@ -652,6 +951,23 @@ Technology, 1979.
 M.~J. Freedman, K.~Nissim, and B.~Pinkas.
 \newblock Efficient private matching and set intersection.
 \newblock In \emph{EUROCRYPT}, 2004.
+
+\bibitem{aes03}
+R.~Agrawal, A.~Evfimievski, and R.~Srikant.
+\newblock Information sharing across private databases.
+\newblock In \emph{ACM SIGMOD International Conference on Management of Data},
+2003.
+
+\bibitem{jl09}
+S.~Jarecki and X.~Liu.
+\newblock Efficient oblivious pseudorandom function with applications to
+adaptive OT and secure computation of set intersection.
+\newblock In \emph{Theory of Cryptography Conference (TCC)}, 2009.
+
+\bibitem{jl10}
+S.~Jarecki and X.~Liu.
+\newblock Fast secure computation of set intersection.
+\newblock In \emph{Security and Cryptography for Networks (SCN)}, 2010.
 
 \bibitem{dt10}
 E.~De~Cristofaro and G.~Tsudik.

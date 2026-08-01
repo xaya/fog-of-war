@@ -2,9 +2,11 @@
 //
 // Nothing here shares a line with src/. The field arithmetic is BigInt rather than
 // 5x51-bit limbs, the ladder is transcribed from RFC 7748 section 5, Elligator 2 is
-// transcribed from the paper's section 4.2, and every derivation string comes from
-// section 4.3. It then checks all of it against the SAME vector the C++ tests use --
-// bytes that came out of the deployed dungeonchannel blob.
+// the x-only Z = 2 map the paper's section 4 ("Our instantiation") names and defers
+// here, and every derivation follows the structure of section 4.1 -- with the
+// deployed four-byte domain tags and little-endian encodings, which the paper
+// abstracts and include/fow.hpp pins. It then checks all of it against the SAME
+// vector the C++ tests use -- bytes that came out of the deployed dungeonchannel blob.
 //
 //   node tests/verify-math.mjs
 //
@@ -20,7 +22,7 @@ const check = (ok, what) => {
   return ok;
 };
 
-// ─── the field: F_p, p = 2^255 - 19 (paper section 4.1) ────────────────────────
+// ─── the field: F_p, p = 2^255 - 19 (paper section 4) ──────────────────────────
 const P = (1n << 255n) - 19n;
 const A = 486662n;
 const ELL = (1n << 252n) + 27742317777372353535851937790883648493n;
@@ -38,7 +40,7 @@ const leToBig = (b) => { let v = 0n; for (let i = b.length - 1; i >= 0; --i) v =
 const bigToLe32 = (v) => { const o = new Uint8Array(32); for (let i = 0; i < 32; ++i) { o[i] = Number(v & 0xffn); v >>= 8n; } return o; };
 
 // ─── the ladder: RFC 7748 section 5, UNCLAMPED, a fixed 255 iterations ─────────
-// Unclamped is deliberate and is the paper's section 4.1: these scalars must compose
+// Unclamped is deliberate and is the paper's section 4: these scalars must compose
 // multiplicatively, and the transcript has to be a pure function of the derived
 // scalar so an audit can recompute it with no hidden transformation.
 function ladder(scalarBytes, uBytes) {
@@ -64,7 +66,7 @@ function ladder(scalarBytes, uBytes) {
   return bigToLe32(mod(x2 * inv(z2)));
 }
 
-// ─── x-only Elligator 2, Z = 2 (paper section 4.2) ─────────────────────────────
+// ─── x-only Elligator 2, Z = 2 (paper section 4) ───────────────────────────────
 function elligator2(inBytes) {
   const u = mod(leToBig(inBytes) & ((1n << 255n) - 1n));
   let tv1 = mod(2n * u * u);
@@ -78,14 +80,17 @@ function elligator2(inBytes) {
 const COFACTOR8 = (() => { const s = new Uint8Array(32); s[0] = 8; return s; })();
 const H2C = (msg) => ladder(COFACTOR8, elligator2(sha256(msg)));
 
-// ─── the derivations (paper section 4.3) ───────────────────────────────────────
+// ─── the derivations (paper section 4.1) ───────────────────────────────────────
 const le16 = (v) => Uint8Array.from([v & 0xff, (v >> 8) & 0xff]);
 const le32 = (v) => Uint8Array.from([v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]);
 const cat = (...xs) => { const n = xs.reduce((s, x) => s + x.length, 0); const o = new Uint8Array(n); let p = 0; for (const x of xs) { o.set(x, p); p += x.length; } return o; };
 const ascii = (s) => Uint8Array.from([...s].map((c) => c.charCodeAt(0)));
 
 const elementPoint = (code) => H2C(cat(ascii("DCHT"), le16(code)));
-const dummyPoint = (seed, j) => H2C(cat(ascii("DCHD"), seed, le16(j)));
+// The round is in the dummy preimage ON PURPOSE (the paper's eq. for D_{r,j}): a
+// dispute publishes that round's alpha, and pad points that outlived their round
+// would hand a chosen-query peer a standing threshold-bit read on the set size.
+const dummyPoint = (seed, round, j) => H2C(cat(ascii("DCHD"), seed, le32(round), le16(j)));
 const petScalar = (seed, round) => {
   const s = Uint8Array.from(sha256(cat(ascii("DCHP"), seed, le32(round))));
   s[31] &= 0x0f;                                  // < 2^252
@@ -99,7 +104,7 @@ function petBuild(seed, round, ownElement, elements) {
   const entries = [];
   for (let i = 0; i < PAD; ++i)
     entries.push(ladder(alpha, i < elements.length ? elementPoint(elements[i])
-                                                   : dummyPoint(seed, i)));
+                                                   : dummyPoint(seed, round, i)));
   entries.sort(Buffer.compare);                    // canonical order: encoded bytes
   return cat(...entries, ladder(alpha, elementPoint(ownElement)));
 }
@@ -174,9 +179,11 @@ function merkleVerify(leafIndex, leaf, path, root) {
   check(allZero, "l * H2C(e) is the identity: on the curve, cofactor cleared");
 }
 
-// ─── 3. the deployed vector, recomputed from the paper alone ──────────────────
+// ─── 3. the deployed vector, recomputed from the paper's formulas + pinned tags ─
 // These bytes came out of Xaya's dungeonchannel blob: the champion on spawn 0 of map
 // seed 0x5EED1234 at round 7. The element codes are its visible set as Morton codes.
+// Refrozen 2026-07-31 with the round-dependent pad: the flight digest and the root
+// moved; Q and R did not, because neither contains a dummy.
 {
   const seed = Uint8Array.from({ length: 32 }, (_v, i) => 0xa0 + i);
   const own = 611;
@@ -191,7 +198,7 @@ function merkleVerify(leafIndex, leaf, path, root) {
   const f1 = petBuild(seed, 7, own, elems);
   check(f1.length === (PAD + 1) * 32, "flight 1 is (N+1)*32 = 4128 bytes");
   check(Buffer.from(sha256(f1)).toString("hex") ===
-        "f88749d168ca57486f178e180647db0d49be19dbc5cfcf1a2b17ad71916b9ac6",
+        "6abe2e003620686b9bed5cb1027a6450c2cab56cf5900947f48fd7ed1ee32d15",
         "SHA-256 OF THE WHOLE FLIGHT MATCHES THE DEPLOYED BLOB");
   check(Buffer.from(f1.slice(PAD * 32)).toString("hex") ===
         "64922ddb71e5aceea0fb91adc3a75be6a601b95d91cc71b0839e7f3410965733",
@@ -203,7 +210,7 @@ function merkleVerify(leafIndex, leaf, path, root) {
         "and the flight-2 response matches");
   const root = petFlightHash(f1, r);
   check(Buffer.from(root).toString("hex") ===
-        "a0aae0d065b0014b00ed3e56061796e9f8a9aff7a0b93f6fc25f7c3784a144af",
+        "9303f5c56a045f2f242b195a87584f5c286395c0d99ec402a46aeda18321a774",
         "and the commitment ROOT matches");
   // And the tree is usable: R proves against the root it just produced, and does not
   // prove at a neighbouring index.

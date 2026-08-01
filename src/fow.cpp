@@ -395,18 +395,27 @@ void elementPoint(uint16_t code, uint8_t out[32]) {
 
 namespace {
 
-// DELIBERATELY ROUND-INDEPENDENT. Per-round freshness comes entirely from the
-// blinding scalar (alpha_r changes every round, so alpha_r * D_i is unlinkable
-// across rounds under DDH exactly as alpha_r * P_t is for a stationary tile).
-// Keeping D_i fixed per seed means a client may precompute every curve point it
-// will ever need, tiles and dummies both, and the per-round cost collapses
-// to ladders alone, with no protocol change and no audit-rule change.
-void dummyPoint(const uint8_t seed[HASH_BYTES], uint16_t i, uint8_t out[32]) {
-  uint8_t buf[4 + HASH_BYTES + 2];
+// DELIBERATELY ROUND-DEPENDENT, and it was not always: an earlier revision hashed
+// "DCHD" || seed || LE16(i) with no round in the preimage, so a party's pad points
+// were fixed for the life of its seed. That is a trap for any surrounding protocol
+// that ever publishes a round's blinding scalar -- the deployed game's disputes do,
+// by design. alpha_r is invertible mod the group order, so a published alpha_r
+// unblinds that round's pad; if those same D_i stayed in service, each recovered
+// point replayed as a query Q reads a threshold bit about the CURRENT set size
+// (petBuild fills slots >= count with dummies, so "still in use" bounds |set| by
+// that element's index), round after round -- a standing handle on the one quantity
+// the fixed-size pad exists to hide. Folding the round into the preimage confines
+// any recovery to the round already disclosed. The cost: only elementPoint outputs
+// can be precomputed; the pad is re-derived each round, the same PET_PAD maps the
+// budget already prices. See paper/ section 4.1.
+void dummyPoint(const uint8_t seed[HASH_BYTES], uint16_t round, uint16_t i,
+                uint8_t out[32]) {
+  uint8_t buf[4 + HASH_BYTES + 4 + 2];
   buf[0] = 'D'; buf[1] = 'C'; buf[2] = 'H'; buf[3] = 'D';
   std::memcpy(buf + 4, seed, HASH_BYTES);
-  buf[4 + HASH_BYTES] = (uint8_t)i;
-  buf[4 + HASH_BYTES + 1] = (uint8_t)(i >> 8);
+  le32(buf + 4 + HASH_BYTES, round);
+  buf[4 + HASH_BYTES + 4] = (uint8_t)i;
+  buf[4 + HASH_BYTES + 5] = (uint8_t)(i >> 8);
   hashToPoint(buf, sizeof(buf), out);
 }
 
@@ -424,11 +433,11 @@ int petBuild(const uint8_t seed[HASH_BYTES], uint16_t round, uint16_t ownElement
   // S: the blinded set, padded with blinded dummies to a fixed size. The dummies are
   // hashed to the curve exactly like real elements, so the work is constant
   // (PET_PAD maps + PET_PAD ladders) whatever the set size, so no timing tell either.
-  static uint8_t entries[PET_PAD][PET_POINT_BYTES];
+  uint8_t entries[PET_PAD][PET_POINT_BYTES];
   for (int i = 0; i < PET_PAD; ++i) {
     uint8_t p[32];
     if (i < count) elementPoint(elements[i], p);
-    else dummyPoint(seed, (uint16_t)i, p);
+    else dummyPoint(seed, round, (uint16_t)i, p);
     ladder(entries[i], alpha, p);
   }
 

@@ -201,6 +201,14 @@ void testMatchesDeployedDungeonchannel() {
   // So this is the check that makes the paper's measurements describe THIS code. If
   // the extraction had drifted by one byte anywhere, in a domain tag, the sort, the
   // pad derivation or the scalar mask, it would fail here.
+  //
+  // REFROZEN 2026-07-31, after the deployed pad dummies became round-dependent on
+  // 2026-07-30 (see dummyPoint in src/fow.cpp): every pad slot moved, so the flight
+  // digest and the commitment root moved with the deployed game. Q and R are
+  // UNCHANGED, and that is the corroboration -- neither contains a dummy, so a
+  // change to the scalar derivation, the element points, Elligator 2 or the ladder
+  // would have moved them too; the digest and root, matched against the deployed
+  // game, cover the sort and the tree shape.
   uint8_t seed[32];
   for (int i = 0; i < 32; ++i) seed[i] = (uint8_t)(0xA0 + i);
   const uint16_t own = 611;
@@ -219,7 +227,7 @@ void testMatchesDeployedDungeonchannel() {
 
   uint8_t digest[32], wantDigest[32];
   fow::sha256(f1, fow::PET_BUILD_BYTES, digest);
-  hexTo("f88749d168ca57486f178e180647db0d49be19dbc5cfcf1a2b17ad71916b9ac6", wantDigest, 32);
+  hexTo("6abe2e003620686b9bed5cb1027a6450c2cab56cf5900947f48fd7ed1ee32d15", wantDigest, 32);
   char hex[65];
   hexOf(digest, 32, hex);
   if (std::memcmp(digest, wantDigest, 32) != 0) std::printf("  got sha256(flight1) %s\n", hex);
@@ -237,7 +245,7 @@ void testMatchesDeployedDungeonchannel() {
 
   uint8_t fh[32], wantFh[32];
   fow::petFlightHash(f1, r, fh);
-  hexTo("a0aae0d065b0014b00ed3e56061796e9f8a9aff7a0b93f6fc25f7c3784a144af", wantFh, 32);
+  hexTo("9303f5c56a045f2f242b195a87584f5c286395c0d99ec402a46aeda18321a774", wantFh, 32);
   check(std::memcmp(fh, wantFh, 32) == 0, "and the commitment root matches");
 
   // Its own element is in its own set, so the self-test bit is 1, and the deployed
