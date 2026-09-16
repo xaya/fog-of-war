@@ -1,27 +1,16 @@
 // Tests for the blinded sighting test.
 //
-// Three kinds of evidence, in increasing order of what they prove:
-//
-//   1. THE CURVE IS THE REAL CURVE. RFC 7748 section 5.2's known-answer vectors,
-//      run through this ladder, plus the identity l*P == O for hash-to-curve
-//      outputs, which proves curve membership AND cofactor clearing at once (a
-//      point on the twist, or one with an 8-torsion component, fails it).
-//
-//   2. THE PROTOCOL COMPUTES THE RIGHT BIT. Two parties, symmetric relation, run
-//      end to end: the bit is 1 exactly when each holds the other's element.
-//
-//   3. IT IS BYTE-IDENTICAL TO THE DEPLOYED GAME. The vector in
-//      testMatchesDeployedDungeonchannel was produced by Xaya's dungeonchannel
-//      blob, not by this file, so the paper's measurements describe THIS code.
-//
-// The independent check lives in tests/verify-math.mjs: a from-scratch BigInt
-// implementation written from the paper's formulas, which must reproduce these same
-// bytes. Agreement between two implementations that share no code is the claim.
+// RFC 7748 known answers, sampled group properties, directed membership and
+// Merkle openings. The independent BigInt implementation checks the same
+// historical fixture. These tests establish no general privacy theorem or
+// compatibility with the current game's wire format.
 #include "fow.hpp"
 #include "sha256.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 
 namespace {
 
@@ -99,35 +88,63 @@ void testRfc7748Vectors() {
     if (i == 0) check(std::memcmp(kk, w1, 32) == 0, "RFC 7748 ITERATION 1 MATCHES");
   }
   check(std::memcmp(kk, w1000, 32) == 0, "RFC 7748 ITERATION 1000 MATCHES");
-  pass("the ladder is X25519, pinned to RFC 7748 section 5.2");
+  pass("ladder matches RFC 7748 known answers with test-side clamping");
 }
 
 void testHashToCurveLandsInThePrimeOrderSubgroup() {
-  // l * P == O for every hash-to-curve output. The x-only ladder represents the
-  // identity as zero, so this single identity proves the point is on the curve AND
-  // that the cofactor was cleared: a twist point or an 8-torsion component fails.
+  // Check sampled nonidentity points. Zero output alone does not distinguish
+  // the identity from every low-order input in an x-only ladder, so also check
+  // (l-1)P has P's x-coordinate (negation in the prime-order subgroup).
   uint8_t ell[32];
   check(hexTo("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010", ell, 32),
         "the group order parses");
-  int allZero = 1, anyDistinct = 0;
+  uint8_t ellMinusOne[32];
+  std::memcpy(ellMinusOne, ell, 32);
+  --ellMinusOne[0];
+  int allZero = 1, allNonzero = 1, allNegate = 1, anyDistinct = 0;
   uint8_t prev[32] = {0};
   for (uint16_t i = 0; i < 64; ++i) {
     uint8_t p[32], q[32];
     fow::elementPoint(i, p);
+    uint8_t nonzero = 0;
+    for (int j = 0; j < 32; ++j) nonzero |= p[j];
+    if (!nonzero) allNonzero = 0;
     fow::scalarMult(ell, p, q);
     for (int j = 0; j < 32; ++j) if (q[j] != 0) allZero = 0;
+    fow::scalarMult(ellMinusOne, p, q);
+    if (std::memcmp(p, q, 32) != 0) allNegate = 0;
     if (i > 0 && std::memcmp(p, prev, 32) != 0) anyDistinct = 1;
     std::memcpy(prev, p, 32);
   }
   check(allZero, "l * H2C(e) == O FOR EVERY SAMPLED ELEMENT (on-curve, cofactor cleared)");
-  check(anyDistinct, "and distinct elements give distinct points");
+  check(allNonzero && allNegate, "sampled points are nonzero and (l-1)P has P's x-coordinate");
+  check(anyDistinct, "and the sampled points are not all identical");
 
   // Determinism: the same input always gives the same point.
   uint8_t a[32], b[32];
   fow::elementPoint(611, a);
   fow::elementPoint(611, b);
   check(std::memcmp(a, b, 32) == 0, "hash-to-curve is deterministic");
-  pass("hash-to-curve: Elligator 2, in the prime-order subgroup");
+
+  // The correctness theorem assumes distinct real elements give distinct
+  // x-coordinates and no element gives the identity. The universe is 2^16 codes,
+  // so check it exhaustively rather than sample it.
+  static uint8_t all[65536][32];
+  int zero = 0;
+  for (uint32_t code = 0; code < 65536; ++code) {
+    fow::elementPoint((uint16_t)code, all[code]);
+    uint8_t acc = 0;
+    for (int j = 0; j < 32; ++j) acc |= all[code][j];
+    if (!acc) ++zero;
+  }
+  std::qsort(all, 65536, 32,
+             [](const void* x, const void* y) { return std::memcmp(x, y, 32); });
+  int dup = 0;
+  for (int i = 1; i < 65536; ++i)
+    if (std::memcmp(all[i - 1], all[i], 32) == 0) ++dup;
+  check(zero == 0 && dup == 0,
+        "ALL 65,536 ELEMENT POINTS ARE NONZERO AND PAIRWISE DISTINCT");
+  pass("hash-to-curve: Elligator 2, in the prime-order subgroup, distinct over the universe");
 }
 
 void testTheBitIsRight() {
@@ -180,46 +197,76 @@ void testTheBitIsRight() {
           "and a set larger than the pad is refused, not truncated");
   }
 
-  // FRESH EVERY ROUND: the same set at a different round is a different flight, so
-  // linking a stationary party across rounds is DDH rather than a byte compare.
+  // FRESH EVERY ROUND: the same set at a different round is a different flight.
+  // This is a byte compare only; the paper claims no cross-round theorem.
   {
     const uint16_t setA[] = {aElem, bElem};
     fow::petBuild(seedA, 5, aElem, setA, 2, fa);
     fow::petBuild(seedA, 6, aElem, setA, 2, fb);
     check(std::memcmp(fa, fb, fow::PET_BUILD_BYTES) != 0,
-          "the same set at the next round is unrecognisable");
+          "the same set at the next round differs byte-wise");
   }
-  pass("the protocol computes membership and nothing else");
+  pass("honest membership and fixed payload sizes");
 }
 
-void testMatchesDeployedDungeonchannel() {
-  // THE VECTOR BELOW CAME OUT OF XAYA'S DUNGEONCHANNEL, not out of this file: the
-  // deployed rules blob was asked for the flight of the champion standing on spawn 0
-  // of map seed 0x5EED1234 at round 7, and these are the bytes it produced. The
-  // element codes are that champion's visible set as Morton codes.
-  //
-  // So this is the check that makes the paper's measurements describe THIS code. If
-  // the extraction had drifted by one byte anywhere, in a domain tag, the sort, the
-  // pad derivation or the scalar mask, it would fail here.
-  //
-  // REFROZEN 2026-07-31, after the deployed pad dummies became round-dependent on
-  // 2026-07-30 (see dummyPoint in src/fow.cpp): every pad slot moved, so the flight
-  // digest and the commitment root moved with the deployed game. Q and R are
-  // UNCHANGED, and that is the corroboration -- neither contains a dummy, so a
-  // change to the scalar derivation, the element points, Elligator 2 or the ladder
-  // would have moved them too; the digest and root, matched against the deployed
-  // game, cover the sort and the tree shape.
+void testDirectedResultsAndInputBoundaries() {
+  uint8_t seedA[32] = {1}, seedB[32] = {2};
+  uint8_t fa[fow::PET_BUILD_BYTES], fb[fow::PET_BUILD_BYTES], ra[32], rb[32];
+  const uint16_t setA[] = {0, 65535}, setB[] = {65535};
+  const int qOffset = fow::PET_PAD * 32;
+  for (uint16_t round : {uint16_t(0), uint16_t(65535)}) {
+    check(fow::petBuild(seedA, round, 0, setA, 2, fa) == fow::PET_BUILD_BYTES &&
+          fow::petBuild(seedB, round, 65535, setB, 1, fb) == fow::PET_BUILD_BYTES,
+          "boundary elements and rounds build");
+    fow::petRespond(seedA, round, fb + qOffset, ra);
+    fow::petRespond(seedB, round, fa + qOffset, rb);
+    check(fow::petFinish(seedA, round, fb, rb) == 0 &&
+          fow::petFinish(seedB, round, fa, ra) == 1,
+          "a directional relation gives different correct results");
+  }
+  const uint16_t reversed[] = {65535, 0};
+  fow::petBuild(seedA, 65535, 0, reversed, 2, fb);
+  check(std::memcmp(fa, fb, sizeof fa) == 0, "enumeration order does not change the flight");
+  check(fow::petBuild(seedA, 0, 0, nullptr, 0, fb) == fow::PET_BUILD_BYTES,
+        "an empty set builds with a null element pointer");
+  fow::petBuild(seedB, 0, 65535, setB, 1, fa);
+  fow::petRespond(seedA, 0, fa + qOffset, ra);
+  check(fow::petFinish(seedB, 0, fb, ra) == 0, "an empty set has no membership");
+  check(fow::petBuild(seedA, 0, 0, nullptr, 1, fa) == -1 &&
+        fow::petBuild(seedA, 0, 0, setA, -1, fa) == -1,
+        "missing elements and negative counts are refused");
+
+  // Counterexamples delimit the paper's claims; the raw API is not a referee.
+  const uint16_t duplicates[] = {0, 0};
+  fow::petBuild(seedA, 0, 0, duplicates, 2, fa);
+  int matches = 0;
+  for (int i = 0; i < fow::PET_PAD; ++i)
+    if (std::memcmp(fa + i * 32, fa + qOffset, 32) == 0) ++matches;
+  check(matches == 2, "duplicate multiplicity and query/set overlap are visible");
+  std::memset(fb, 0, sizeof fb);
+  std::memset(rb, 0, sizeof rb);
+  check(fow::petFinish(seedA, 0, fb, rb) == 1,
+        "a forged zero set and response force a positive raw result");
+  pass("directed correctness, input boundaries and explicit leakage examples");
+}
+
+void testHistoricalDungeonchannelVector() {
+  // Historical fixture from Dungeon Channel revision 1ad3b7f (2026-08-01 14:54
+  // UTC, the 128x128 map): spawn 0 = tile (120, 5) of map seed 0x5EED1234, round 7,
+  // the omnidirectional radius-6 line-of-sight set of that tile as Morton codes,
+  // in the game's own enumeration order. That revision's test suite pinned the same
+  // root over these inputs. This test loads no map, rules or hosted WASM.
   uint8_t seed[32];
   for (int i = 0; i < 32; ++i) seed[i] = (uint8_t)(0xA0 + i);
-  const uint16_t own = 611;
+  const uint16_t own = 10897;  // morton((120, 5)), 14 bits
   const uint16_t elems[] = {
-      539, 561, 563, 569, 571, 540, 542, 564, 566, 572, 574, 660, 535, 541, 543,
-      565, 567, 573, 575, 661, 663, 578, 584, 586, 608, 610, 616, 618, 704, 706,
-      579, 585, 587, 609, 611, 617, 619, 705, 707, 713, 715, 582, 588, 590, 612,
-      614, 620, 622, 708, 710, 583, 589, 591, 613, 615, 621, 623, 709, 711, 600,
-      602, 624, 626, 632, 634, 720, 603, 625, 627, 633, 635, 628, 630, 636, 631};
+      10790, 10796, 10798, 10884, 10886, 10892, 10894, 10791, 10797, 10799, 10885,
+      10887, 10893, 10895, 10802, 10808, 10810, 10896, 10898, 10904, 10906, 10777,
+      10779, 10801, 10803, 10809, 10811, 10897, 10899, 10905, 10907, 10806, 10812,
+      10814, 10900, 10902, 10908, 10910, 10807, 10813, 10815, 10901, 10903, 10909,
+      10911, 10850, 10856, 10858, 10944, 10946, 10952, 10954, 10945, 10948, 10949};
   const int n = (int)(sizeof(elems) / sizeof(elems[0]));
-  check(n == 75, "the deployed visible set had 75 elements");
+  check(n == 55, "the historical visible set had 55 elements");
 
   static uint8_t f1[fow::PET_BUILD_BYTES];
   check(fow::petBuild(seed, 7, own, elems, n, f1) == fow::PET_BUILD_BYTES,
@@ -227,31 +274,30 @@ void testMatchesDeployedDungeonchannel() {
 
   uint8_t digest[32], wantDigest[32];
   fow::sha256(f1, fow::PET_BUILD_BYTES, digest);
-  hexTo("6abe2e003620686b9bed5cb1027a6450c2cab56cf5900947f48fd7ed1ee32d15", wantDigest, 32);
+  hexTo("106e8a31ba80abcab999bd08fd7637eba04c87232637416d74d325f0b541b7d9", wantDigest, 32);
   char hex[65];
   hexOf(digest, 32, hex);
   if (std::memcmp(digest, wantDigest, 32) != 0) std::printf("  got sha256(flight1) %s\n", hex);
   check(std::memcmp(digest, wantDigest, 32) == 0,
-        "SHA-256 OF THE WHOLE FLIGHT MATCHES THE DEPLOYED GAME");
+        "flight digest matches the historical fixture");
 
   uint8_t wantQ[32];
-  hexTo("64922ddb71e5aceea0fb91adc3a75be6a601b95d91cc71b0839e7f3410965733", wantQ, 32);
+  hexTo("2ec31f4c132caefd3a05ae1a5fc40974437417b36dd7efde2e6d493c4d551417", wantQ, 32);
   check(std::memcmp(f1 + fow::PET_PAD * 32, wantQ, 32) == 0, "and Q matches");
 
   uint8_t r[32], wantR[32];
   fow::petRespond(seed, 7, f1 + fow::PET_PAD * 32, r);
-  hexTo("01204d2f6b9b94ee0a29055efc49a0ef25e164ff2eb7dbb9e082244d8415cf12", wantR, 32);
+  hexTo("fc91185d3b6994fda37920ebe2473849321249ca4d345bfedffde2319a73b12b", wantR, 32);
   check(std::memcmp(r, wantR, 32) == 0, "and the flight-2 response matches");
 
   uint8_t fh[32], wantFh[32];
   fow::petFlightHash(f1, r, fh);
-  hexTo("9303f5c56a045f2f242b195a87584f5c286395c0d99ec402a46aeda18321a774", wantFh, 32);
+  hexTo("81fdba4d86cb4be4dfc44adc3822dc9fce9bb06026316c8eedd3a6e9e1448fca", wantFh, 32);
   check(std::memcmp(fh, wantFh, 32) == 0, "and the commitment root matches");
 
-  // Its own element is in its own set, so the self-test bit is 1, and the deployed
-  // code reports the same.
+  // Its own element is in its own set, so the historical self-test bit is 1.
   check(fow::petFinish(seed, 7, f1, r) == 1, "and the bit agrees");
-  pass("byte-identical to the deployed dungeonchannel blob");
+  pass("matches the Dungeon Channel fixture of revision 1ad3b7f (2026-08-01)");
 }
 
 
@@ -323,7 +369,7 @@ void testTheCommitmentIsAMerkleRoot() {
     check(std::memcmp(rootA, rootOther, 32) != 0,
           "changing only the flight-2 response changes the root");
   }
-  pass("the commitment is a Merkle root: every leaf proves, nothing else does");
+  pass("all used Merkle leaves open and tested tampered witnesses fail");
 }
 
 }  // namespace
@@ -333,8 +379,9 @@ int main() {
   testRfc7748Vectors();
   testHashToCurveLandsInThePrimeOrderSubgroup();
   testTheBitIsRight();
+  testDirectedResultsAndInputBoundaries();
   testTheCommitmentIsAMerkleRoot();
-  testMatchesDeployedDungeonchannel();
+  testHistoricalDungeonchannelVector();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   if (g_failures) { std::printf("FAILED\n"); return 1; }
   std::printf("OK\n");

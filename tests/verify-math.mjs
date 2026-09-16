@@ -1,17 +1,5 @@
-// AN INDEPENDENT IMPLEMENTATION, WRITTEN FROM THE PAPER.
-//
-// Nothing here shares a line with src/. The field arithmetic is BigInt rather than
-// 5x51-bit limbs, the ladder is transcribed from RFC 7748 section 5, Elligator 2 is
-// the x-only Z = 2 map the paper's section 4 ("Our instantiation") names and defers
-// here, and every derivation follows the structure of section 4.1 -- with the
-// deployed four-byte domain tags and little-endian encodings, which the paper
-// abstracts and include/fow.hpp pins. It then checks all of it against the SAME
-// vector the C++ tests use -- bytes that came out of the deployed dungeonchannel blob.
-//
-//   node tests/verify-math.mjs
-//
-// Two implementations that share no code, both reproducing the deployed bytes, is
-// the actual claim. If the paper and the code ever diverge, this fails.
+// Independent BigInt arithmetic for the reference protocol. Known answers and
+// counterexamples test the specified cases, not privacy or the current game's wire.
 
 import { createHash } from "node:crypto";
 
@@ -22,7 +10,7 @@ const check = (ok, what) => {
   return ok;
 };
 
-// ─── the field: F_p, p = 2^255 - 19 (paper section 4) ──────────────────────────
+// ─── the field: F_p, p = 2^255 - 19 (paper section 2) ──────────────────────────
 const P = (1n << 255n) - 19n;
 const A = 486662n;
 const ELL = (1n << 252n) + 27742317777372353535851937790883648493n;
@@ -40,7 +28,7 @@ const leToBig = (b) => { let v = 0n; for (let i = b.length - 1; i >= 0; --i) v =
 const bigToLe32 = (v) => { const o = new Uint8Array(32); for (let i = 0; i < 32; ++i) { o[i] = Number(v & 0xffn); v >>= 8n; } return o; };
 
 // ─── the ladder: RFC 7748 section 5, UNCLAMPED, a fixed 255 iterations ─────────
-// Unclamped is deliberate and is the paper's section 4: these scalars must compose
+// Unclamped is deliberate and is the paper's section 2: these scalars must compose
 // multiplicatively, and the transcript has to be a pure function of the derived
 // scalar so an audit can recompute it with no hidden transformation.
 function ladder(scalarBytes, uBytes) {
@@ -66,7 +54,7 @@ function ladder(scalarBytes, uBytes) {
   return bigToLe32(mod(x2 * inv(z2)));
 }
 
-// ─── x-only Elligator 2, Z = 2 (paper section 4) ───────────────────────────────
+// ─── x-only Elligator 2, Z = 2 (paper section 2) ───────────────────────────────
 function elligator2(inBytes) {
   const u = mod(leToBig(inBytes) & ((1n << 255n) - 1n));
   let tv1 = mod(2n * u * u);
@@ -80,14 +68,14 @@ function elligator2(inBytes) {
 const COFACTOR8 = (() => { const s = new Uint8Array(32); s[0] = 8; return s; })();
 const H2C = (msg) => ladder(COFACTOR8, elligator2(sha256(msg)));
 
-// ─── the derivations (paper section 4.1) ───────────────────────────────────────
+// ─── the derivations (paper section 2) ─────────────────────────────────────────
 const le16 = (v) => Uint8Array.from([v & 0xff, (v >> 8) & 0xff]);
 const le32 = (v) => Uint8Array.from([v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]);
 const cat = (...xs) => { const n = xs.reduce((s, x) => s + x.length, 0); const o = new Uint8Array(n); let p = 0; for (const x of xs) { o.set(x, p); p += x.length; } return o; };
 const ascii = (s) => Uint8Array.from([...s].map((c) => c.charCodeAt(0)));
 
 const elementPoint = (code) => H2C(cat(ascii("DCHT"), le16(code)));
-// The round is in the dummy preimage ON PURPOSE (the paper's eq. for D_{r,j}): a
+// The round is in the dummy preimage ON PURPOSE (the paper's D_{i,r,j}): a
 // dispute publishes that round's alpha, and pad points that outlived their round
 // would hand a chosen-query peer a standing threshold-bit read on the set size.
 const dummyPoint = (seed, round, j) => H2C(cat(ascii("DCHD"), seed, le32(round), le16(j)));
@@ -173,44 +161,47 @@ function merkleVerify(leafIndex, leaf, path, root) {
 // ─── 2. hash-to-curve lands in the prime-order subgroup ───────────────────────
 {
   const ellBytes = bigToLe32(ELL);
-  let allZero = true;
-  for (let e = 0; e < 8; ++e)
-    if (!ladder(ellBytes, elementPoint(e)).every((x) => x === 0)) allZero = false;
-  check(allZero, "l * H2C(e) is the identity: on the curve, cofactor cleared");
+  let valid = true;
+  for (let e = 0; e < 8; ++e) {
+    const point = elementPoint(e), x = leToBig(point);
+    if (x === 0n || x >= P || !isSquare(mod(x * x * x + A * x * x + x)) ||
+        !ladder(ellBytes, point).every((v) => v === 0) ||
+        Buffer.compare(ladder(bigToLe32(ELL - 1n), point), point) !== 0) valid = false;
+  }
+  check(valid, "sampled points are nonidentity, on-curve and satisfy the subgroup identities");
 }
 
-// ─── 3. the deployed vector, recomputed from the paper's formulas + pinned tags ─
-// These bytes came out of Xaya's dungeonchannel blob: the champion on spawn 0 of map
-// seed 0x5EED1234 at round 7. The element codes are its visible set as Morton codes.
-// Refrozen 2026-07-31 with the round-dependent pad: the flight digest and the root
-// moved; Q and R did not, because neither contains a dummy.
+// ─── 3. the historical vector, recomputed from the formulas and pinned tags ─
+// Historical fixture from Dungeon Channel revision 1ad3b7f (2026-08-01 14:54 UTC):
+// spawn 0 = tile (120, 5) of map seed 0x5EED1234, round 7, its omnidirectional
+// radius-6 sight set. No current game rules or hosted WASM are loaded.
 {
   const seed = Uint8Array.from({ length: 32 }, (_v, i) => 0xa0 + i);
-  const own = 611;
+  const own = 10897;                                 // morton((120, 5)), 14 bits
   const elems = [
-    539, 561, 563, 569, 571, 540, 542, 564, 566, 572, 574, 660, 535, 541, 543,
-    565, 567, 573, 575, 661, 663, 578, 584, 586, 608, 610, 616, 618, 704, 706,
-    579, 585, 587, 609, 611, 617, 619, 705, 707, 713, 715, 582, 588, 590, 612,
-    614, 620, 622, 708, 710, 583, 589, 591, 613, 615, 621, 623, 709, 711, 600,
-    602, 624, 626, 632, 634, 720, 603, 625, 627, 633, 635, 628, 630, 636, 631];
-  check(elems.length === 75, "the deployed visible set had 75 elements");
+    10790, 10796, 10798, 10884, 10886, 10892, 10894, 10791, 10797, 10799, 10885,
+    10887, 10893, 10895, 10802, 10808, 10810, 10896, 10898, 10904, 10906, 10777,
+    10779, 10801, 10803, 10809, 10811, 10897, 10899, 10905, 10907, 10806, 10812,
+    10814, 10900, 10902, 10908, 10910, 10807, 10813, 10815, 10901, 10903, 10909,
+    10911, 10850, 10856, 10858, 10944, 10946, 10952, 10954, 10945, 10948, 10949];
+  check(elems.length === 55, "the historical visible set had 55 elements");
 
   const f1 = petBuild(seed, 7, own, elems);
   check(f1.length === (PAD + 1) * 32, "flight 1 is (N+1)*32 = 4128 bytes");
   check(Buffer.from(sha256(f1)).toString("hex") ===
-        "6abe2e003620686b9bed5cb1027a6450c2cab56cf5900947f48fd7ed1ee32d15",
-        "SHA-256 OF THE WHOLE FLIGHT MATCHES THE DEPLOYED BLOB");
+        "106e8a31ba80abcab999bd08fd7637eba04c87232637416d74d325f0b541b7d9",
+        "flight digest matches the historical fixture");
   check(Buffer.from(f1.slice(PAD * 32)).toString("hex") ===
-        "64922ddb71e5aceea0fb91adc3a75be6a601b95d91cc71b0839e7f3410965733",
+        "2ec31f4c132caefd3a05ae1a5fc40974437417b36dd7efde2e6d493c4d551417",
         "and Q matches");
 
   const r = petRespond(seed, 7, f1.slice(PAD * 32));
   check(Buffer.from(r).toString("hex") ===
-        "01204d2f6b9b94ee0a29055efc49a0ef25e164ff2eb7dbb9e082244d8415cf12",
+        "fc91185d3b6994fda37920ebe2473849321249ca4d345bfedffde2319a73b12b",
         "and the flight-2 response matches");
   const root = petFlightHash(f1, r);
   check(Buffer.from(root).toString("hex") ===
-        "9303f5c56a045f2f242b195a87584f5c286395c0d99ec402a46aeda18321a774",
+        "81fdba4d86cb4be4dfc44adc3822dc9fce9bb06026316c8eedd3a6e9e1448fca",
         "and the commitment ROOT matches");
   // And the tree is usable: R proves against the root it just produced, and does not
   // prove at a neighbouring index.
@@ -247,6 +238,54 @@ function merkleVerify(leafIndex, leaf, path, root) {
   check(oa === 0 && ob === 0, "no membership gives the bit 0 on both sides");
 }
 
+// Directional and boundary cases, plus observable equality patterns.
+{
+  const sA = sha256(ascii("boundary-a")), sB = sha256(ascii("boundary-b"));
+  const q = PAD * 32;
+  for (const round of [0, 65535]) {
+    const fa = petBuild(sA, round, 0, [0, 65535]);
+    const fb = petBuild(sB, round, 65535, [65535]);
+    check(petFinish(sA, round, fb, petRespond(sB, round, fa.slice(q))) === 0 &&
+          petFinish(sB, round, fa, petRespond(sA, round, fb.slice(q))) === 1,
+          "asymmetric membership is correct at the round and element boundaries");
+    check(Buffer.compare(fa, petBuild(sA, round, 0, [65535, 0])) === 0,
+          "set enumeration order does not change the flight");
+  }
+  const empty = petBuild(sA, 0, 0, []);
+  const query = petBuild(sB, 0, 65535, [65535]);
+  check(petFinish(sB, 0, empty, petRespond(sA, 0, query.slice(q))) === 0,
+        "an empty padded set has no membership");
+  const dup = petBuild(sA, 0, 0, [0, 0]);
+  let matches = 0;
+  for (let i = 0; i < PAD; ++i)
+    if (Buffer.compare(dup.slice(i * 32, (i + 1) * 32), dup.slice(q)) === 0) ++matches;
+  check(matches === 2, "duplicate multiplicity and query/set overlap are visible");
+  check(petFinish(sA, 0, new Uint8Array(PAD * 32), ZERO32) === 1,
+        "a forged zero set and response force a positive raw result");
+}
+
+// Counterexample: a public discrete-log encoding lets one response expose the set.
+{
+  const g = H2C(ascii("known-log-counterexample"));
+  const ha = (e) => leToBig(sha256(ascii(`bad-map:${e}`))) % (ELL - 1n) + 1n;
+  const alphaA = leToBig(petScalar(sha256(ascii("attacker")), 9));
+  const alphaB = leToBig(petScalar(sha256(ascii("sender")), 9));
+  const queryLog = mod(alphaA * ha(3), ELL);
+  const response = ladder(bigToLe32(alphaB), ladder(bigToLe32(queryLog), g));
+  const recoveredBase = ladder(bigToLe32(pow(queryLog, ELL - 2n, ELL)), response);
+  check(Buffer.compare(recoveredBase, ladder(bigToLe32(alphaB), g)) === 0,
+        "one response reveals the sender's blinded base under a known-log encoding");
+  const hidden = [2, 5, 7];
+  const set = hidden.map((e) => ladder(bigToLe32(mod(alphaB * ha(e), ELL)), g));
+  const recovered = [];
+  for (let e = 0; e < 10; ++e) {
+    const candidate = ladder(bigToLe32(ha(e)), recoveredBase);
+    if (set.some((point) => Buffer.compare(point, candidate) === 0)) recovered.push(e);
+  }
+  check(JSON.stringify(recovered) === JSON.stringify(hidden),
+        "enumeration recovers all real elements, not just the intended membership bit");
+}
+
 console.log(`\n${checks} checks, ${failures} failures`);
-console.log(failures ? "FAILED" : "OK: the paper and the code agree, byte for byte");
+console.log(failures ? "FAILED" : "OK: reference vectors and stated counterexamples pass");
 process.exit(failures ? 1 : 0);

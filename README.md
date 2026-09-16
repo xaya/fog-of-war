@@ -1,238 +1,106 @@
 # Fog of war without zero-knowledge proofs
 
-A **blinded sighting test**: a two-party private membership test that lets two players in
-a turn-based game learn *exactly one bit* — honestly played, "are we in sight?" — and
-nothing else. Reference implementation in ~500 lines of dependency-free C++17, plus the
-paper that specifies it and an independent implementation that checks the paper against
-the code byte for byte.
+A deterministic C++17 reference for a blinded membership test, with a
+[paper](paper/blinded-sighting-test.pdf) and an independent BigInt implementation.
+Code by **Xaya Developers**, under the [MIT licence](LICENSE). The paper lists its
+research authors separately.
 
-Extracted from the fog of war deployed in Xaya's `dungeonchannel`, and pinned to be
-byte-identical to it.
+Each party holds an element and a set. After exchanging two flights, A computes
+whether A's element is in B's set, and B computes the reverse membership. In a
+game those can be directed sighting results; they agree only for a symmetric
+relation. Honest correctness is conditional on the group and encoding assumptions
+stated in the paper. This library does not establish privacy against malicious
+inputs or implement a complete game channel.
 
-## The problem this solves
+## Scope
 
-Hidden information on a replicated state machine is awkward: every replica must verify
-every transition, yet fog of war requires that positions stay secret. Commit-reveal hides
-positions perfectly, and that is exactly what breaks the game. If neither player may
-learn anything about the other before the endgame, two players six tiles apart **walk past
-each other in the dark, every round, for the whole match**. In our own testbed, removing
-all position disclosure produced 142 rounds of mutual line of sight in which neither
-player was told anything.
+This is the original sight-only instrument extracted from Dungeon Channel. Its
+frozen test vector was produced by revision 1ad3b7f (2026-08-01 14:54 UTC) of the original
+Dungeon Channel history, which the arcade repository's retained history does not
+reach: an omnidirectional radius-6 sight set, before the facing beam. The
+current [Dungeon Channel](https://github.com/xaya/arcade-dungeonchannel) (a
+private repository) still reproduces that vector's set block and query with the
+same per-element primitive, but its flight layout, Merkle tree and response
+differ, it validates its published second-lock and victim points, and it uses sealed-envelope sight
+delivery, a hearing block and additional settlement checks. Do not use this
+library as a replacement for that game's current rules or treat its historical
+vector as a current compatibility test. The paper's appendix lists the fixture.
 
-So the requirement is a conjunction, and both halves have to hold at once:
+The underlying DH matching technique is established prior art. The paper presents
+an implementation and game-channel integration case study, with explicit limits.
+It does not claim the first cryptographic fog of war, a new PSI primitive, or a
+complete malicious-security proof. Its closest comparisons include
+[OpenConflict](https://crypto.stanford.edu/~dabo/pubs/papers/onlinegames.pdf),
+[Thomson's game proposal](https://edward-thomson.medium.com/preventing-cheaters-in-fog-of-war-games-69f202fbe107),
+[financially backed covert security](https://eprint.iacr.org/2021/1652) and,
+on the zero-knowledge road, [Dark Forest](https://blog.zkga.me/announcing-darkforest).
 
-1. **Nobody learns your position** unless they are close to you.
-2. **Two players who *are* close both learn so**, in the same round, every round.
-
-The usual answer to enforcing that on-chain is a zk-SNARK per move. We could not take it:
-our referee is a zero-import WebAssembly blob metered at 66.3M fuel per call, and one
-Groth16 verification measures at 73.6M. This is what we built instead.
-
-## What the library gives you
-
-Two parties, each holding one secret element and a set of elements. After one round trip
-both learn one bit, *is my element in your set?*, and — under the Diffie–Hellman-style
-assumptions the paper states (plain DDH for an observer; assumptions of the one-more/gap
-kind against a responding receiver, who holds one blinded evaluation per round at a point
-of its choice) — nothing else.
+## Use
 
 ```cpp
 #include "fow.hpp"
 
-// Each party has a secret seed. Elements are 16-bit codes; in a game they are tiles
-// (we use a Morton code), but the library neither knows nor cares.
-uint8_t flightA[fow::PET_BUILD_BYTES];
-fow::petBuild(seedA, round, myElement, myVisibleSet, count, flightA);   // flight 1
-// ... exchange flight 1 with the peer, then answer their Q (its last 32 bytes) ...
-uint8_t responseA[32];
-fow::petRespond(seedA, round, theirQ, responseA);                       // flight 2
-// ... exchange flight 2 ...
-int inSight = fow::petFinish(seedA, round, theirSet, theirResponse);    // the bit
+uint8_t flight[fow::PET_BUILD_BYTES];
+fow::petBuild(seed, round, myElement, mySet, count, flight);
+
+uint8_t response[32];
+fow::petRespond(seed, round, theirQ, response);
+int inTheirSet = fow::petFinish(seed, round, theirSet, theirResponse);
 ```
 
-Both sides get the same answer whenever the underlying relation is symmetric, which is
-what makes "the" shared bit well defined.
+Check the return values and provide buffers of the sizes documented in
+[the header](include/fow.hpp). Sets contain at most 128 16-bit element codes;
+rounds are 16-bit values encoded as LE32 in the derivations. Seed each party and
+match independently with secure randomness. Never wrap the round counter or
+continue using a seed after it is disclosed.
 
-## How it works
+The first flight is a sorted, padded set of 128 blinded points plus the query
+point: 4,128 bytes. The response is 32 bytes. Both parties together exchange
+8,320 payload bytes, excluding signatures and game metadata. The Merkle helper
+commits the set, query and response; an indexed point opening is 290 bytes,
+which is not the size of a complete game dispute.
 
-The construction is the classical Diffie–Hellman private matching protocol of Meadows
-(1986) and Huberman–Franklin–Hogg (1999), known today as ECDH-PSI. What is different here
-is that it is **specialised from set intersection down to membership of a single element,
-evaluated in both directions**, because a game needs one bit and not the overlap.
+## Security boundaries
 
-Writing `α` for a per-round blinding scalar and `P_e` for the curve point of element `e`:
+- Deterministic derivation makes transcripts recomputable. A surrounding protocol
+  must authenticate the actual delivered bytes, bind game inputs, manage seed
+  disclosures and provide sound dispute and timeout rules.
+- Revealing a seed exposes its epoch retrospectively, and a single disclosed
+  round scalar exposes that round's set, query and real count. Re-key before
+  further play if future positions must remain hidden; the reveal also fixes
+  every sighting bit the revealer computed, which constrains its peers. Later
+  penalties cannot undo a leak.
+- Answer exactly one query per seed, round and peer. `petRespond` is a pure
+  function and enforces no limit.
+- Malicious queries read more than one tile: each response answers a chosen
+  predicate over the responder's set and position, and a doctored response
+  forces the peer's result to 0. The raw API does not validate point encodings
+  or membership inputs; an all-zero forged set and response, or a single
+  non-canonical zero among honest entries, always produces a positive result.
+  The bit alone is never evidence of legal play.
+- Padding fixes message length. Duplicate entries and query/set equality remain
+  visible, and two parties' responses are equal exactly when their elements are
+  equal, which anyone holding the transcript can see; repeated results and
+  colluding observers can reveal more context.
+- The code is not constant-time, and the Merkle helpers share scratch storage.
+  Serialize calls to those helpers.
 
-| flight | A sends | B sends |
-|---|---|---|
-| 1 | `S_A = sort{ α_A·P_e : e ∈ set_A, padded to 128 with dummies }` (sorted *together*), then `Q_A = α_A·P_a` | symmetric |
-| 2 | `R_A = α_A·Q_B` | `R_B = α_B·Q_A` |
+Do not replace hash-to-point with `H(element) * G`: when the discrete logarithm
+is public, one response lets a requester enumerate the peer's entire set. The
+independent tests demonstrate this failure.
 
-A then tests whether `R_B ∈ { α_A·s : s ∈ S_B }`. Since `α_A(α_B·P_e) = α_B(α_A·P_e)` on
-the prime-order subgroup, that holds precisely when B's set contains A's element.
+## Build and verify
 
-Three details carry most of the weight:
-
-- **Elligator 2 hash-to-curve, not `H(e)·G`.** This is not a stylistic choice. With
-  `P_e = H(e)·G` the discrete log of every element is public, and a receiver recovers the
-  *entire* set in about `3·|universe|` scalar multiplications: take two blinded elements,
-  form `{h_v⁻¹·X_i}` over all candidates `v`, and intersect. The intersection is `α·G`,
-  after which every element labels itself. The paper states it plainly, calculation included; we found a
-  live instance of it in a well-regarded reference implementation. Points whose discrete
-  log nobody knows are the whole difference between blinding and encoding.
-- **Fixed-size padding.** Sets are padded to 128 entries with per-round, seed-derived
-  dummies hashed to the curve exactly like real elements and sorted in among them, so
-  neither the message length, the work done, nor the wire order leaks the set size.
-- **Everything is derived, nothing is sampled.** The blinding scalar is
-  `SHA256("DCHP" ‖ seed ‖ LE32(round))` masked to 252 bits; dummies are
-  `H2C("DCHD" ‖ seed ‖ LE32(round) ‖ LE16(i))`, deliberately *round-dependent*: a
-  surrounding protocol that ever publishes a round's scalar (the deployed game's
-  disputes do, by design) unblinds that round's pad, and pad points that stayed in
-  service would hand a chosen-query peer a standing threshold-bit read on the set
-  size — the one quantity the fixed pad exists to hide. Rotating the pad confines any
-  recovery to the round already disclosed; only the secret-free element points stay
-  precomputable. That determinism is what lets an audit later recompute any byte a
-  party should have sent, which is how the deployment replaces an in-round proof with
-  after-the-fact attribution.
-
-## Attribution instead of zero-knowledge
-
-The bit is an **instrument, never evidence**. Nothing in the deployed game is ever
-convicted on someone's claim about what their sighting test said. Instead:
-
-- every byte a party should send is a pure function of per-epoch secrets it is already
-  bound to reveal when that epoch closes — at first contact, at a dispute filing, or at
-  the endgame — so an audit can recompute the honest transcript after the fact (in the
-  deployed game the blinding feeds off a dedicated PET seed, split from the movement
-  secret; a reveal re-keys both, so a disclosed seed never governs a round still to be
-  played);
-- `petFlightHash` binds a party to the bytes it actually sent (it goes in the party's own
-  signed move), so a poisoned flight is attributable rather than deniable. It is a Merkle
-  root over the flight, not a flat hash, so a verifier can check ONE supplied element
-  with an 8-step path instead of rehashing all 129. One honest caveat, learned in
-  deployment: only elements the PROVER can locate can ride a path. The accuser's claim
-  about its peer's set works that way (~290 bytes); its claim about its OWN set does not,
-  because locating the peer's element there requires the peer's still-hidden position —
-  the bit's own privacy hides which element matched — so that half of a dispute ships
-  the set whole and the referee scans, which the root has already made cheap to bind;
-- convictions come from recomputing the public relation over positions fixed by
-  commitments made *before* the round's information existed.
-
-The measurement that shapes this: **rebuilding a whole flight inside the referee costs
-~1.98 billion fuel, thirty times the entire per-call budget.** The per-element unit
-price — one hash-to-curve map and one ladder, recomputing one *named* element against
-the committed root — is 15.3M, under a quarter of the budget; the full two-arm dispute
-adjudication measures 28.9M. So the adjudication is necessarily "check one element of a
-flight someone hands you", not "recompute the flight".
-
-## What it does not do
-
-Stated plainly, because these are the parts a reader should not have to discover:
-
-- **Accumulated negatives leak, by construction.** Every "no" tells you the opponent is
-  outside your visible set, and the constraints accumulate. Any protocol that guarantees
-  encounters must leak at least the negatives. We measured it rather than assuming it
-  away: an exact Bayesian attacker *that follows the protocol* still faces **211–925
-  candidate tiles**, and movement-probing hunters located a moving player in **0 of 64
-  matches**. (An attacker who also abuses the chosen-element channel below does better —
-  that is the next bullet.)
-- **The question is not validated — the chosen-element channel.** A responder cannot
-  tell an honest `Q` ("here is where I am") from an aimed one: a malicious party may hash
-  *any* element it names into its query and read a truthful "is that tile in your set?"
-  each round, claiming nothing and filing nothing. Measured against the deployed game,
-  that free question pinned a hider inside ten tiles on 49–71% of rounds for the walking
-  strategies tried. The deployed mitigations — hiding the declared movement mode below
-  contact, and binding `Q` retroactively (next bullet) — cut the pin rate to under 7%
-  and leave a median cover of 25–41 tiles; validating the question *in-round* would need
-  exactly the ZK machinery this design exists to avoid. The paper's sections 6 and 7
-  carry the measurements.
-- **No fairness or liveness.** A party can stall mid-exchange; the surrounding protocol
-  needs a timeout that forfeits.
-- **The relation must be symmetric.** Asymmetric sight ranges would make the two parties'
-  bits legitimately disagree, and the shared-bit framing collapses.
-- **Malicious inputs are not prevented, only attributed.** Nothing stops a party feeding a
-  fabricated set or query point; what makes it *pay* is the determinism and audit above.
-  In the deployed game every flight rides its sender's own signed move under the Merkle
-  commitment, each accepted commitment also retains the round's query element `Q` in a
-  small Merkle frontier, and the pricing — always retroactive, never in-round — comes in
-  two strengths. The endgame audit draws one round per audited epoch and checks the
-  position that round's reveal discloses against the retained `Q` — a sampled catch,
-  28–87% of rounds for the probing strategies measured. For epochs closed mid-match the
-  closing reveal published their PET seed, so every opponent verifies every round off
-  the wire for free — detection there is certain, and a dispute move supplies the
-  conviction. One residual the deployment names: at two seats a probe-then-kill run ends
-  the match before any audit pass exists and leaves nobody to file, so it stays publicly
-  verifiable but convicts nobody on-chain. The paper's section 7 carries the mechanism
-  and the measured strengths.
-- **Not constant-time in the hardened sense.** Branching is not secret-dependent except
-  the final equality tests that decide the bit both sides are about to learn, but this was
-  written for consensus determinism first, not for a side-channel adversary.
-
-## Numbers
-
-| | |
-|---|---|
-| flight 1 | 4,128 bytes; flight 2: 32 bytes; ≈8.3 kB per round both directions |
-| per-party cost | 129 hash-to-curve maps + 259 ladder multiplications ≈ 100 ms in V8 |
-| encounters | unnoticed mutual-sight rounds: **0** (142 before the test existed) |
-| privacy, protocol-following attacker | Bayesian: 211–925 candidate tiles; movement probing: located 0 of 64 |
-| privacy, chosen-element attacker | median cover 25–41 tiles on the deployed wire; pinned ≤10 tiles in under 7% of rounds |
-| referee cost, happy path | no curve arithmetic — a hash-root rebuild and a frontier append per round; audits and disputes buy fixed, measured curve work (worst call 84.8% of the fuel cap) |
-
-## Build and test
-
-No dependencies beyond a C++17 compiler.
+Requires a C++17 compiler supporting `unsigned __int128`; the independent check
+also requires Node.js.
 
 ```sh
-make test      # RFC 7748 vectors, the subgroup identity, the protocol end to end,
-               # and byte-identity with the deployed dungeonchannel blob
-make verify    # the independent BigInt implementation, written from the paper's
-               # formulas and the pinned domain tags (needs node)
+make test      # known answers, every element point (a few seconds), membership, the fixture, Merkle openings
+make verify    # independent arithmetic over the same fixture and examples, plus the known-log break
+make paper     # regenerate the PDF with Tectonic
 ```
 
-`make test` and `make verify` are two implementations that share no code, both reproducing
-the same deployed bytes. That agreement is the claim; if the paper and the code ever
-diverge, `make verify` fails.
-
-## The paper
-
-*Fog of War without Zero-Knowledge Proofs: A Blinded Mutual-Sighting Test for Trustless
-Game Channels* is in [`paper/blinded-sighting-test.pdf`](paper/blinded-sighting-test.pdf).
-It carries the protocol with a correctness theorem, the security analysis (including
-the known-discrete-log break above), and the related work.
-
-## Prior art, and what is ours
-
-The double-blinding trick is old and good, and we claim none of it. It goes back to
-Meadows' cryptographic matchmaking (1986) and Huberman, Franklin and Hogg's private
-community matching (1999); it was formalised for private databases by Agrawal,
-Evfimievski and Srikant (2003), hardened against malicious parties by Jarecki and Liu
-(2009, 2010) — whose one-more-DH-style assumptions are the ones our receiver-privacy
-claim rests on — and given linear-complexity instantiations by De Cristofaro and Tsudik
-(2010); the other main PSI family, oblivious polynomial evaluation over homomorphic
-encryption, begins with Freedman, Nissim and Pinkas (2004). The DH lineage runs at
-planetary scale in Google's Password Checkup and Apple's PSI system. The closest prior art to our setting is Narayanan et al.'s private proximity
-testing (NDSS 2011). Hidden information in adversarial games begins with Mental Poker
-(1979); the modern blockchain example is Dark Forest, which takes the zk-SNARK road we
-could not afford.
-
-Our engineering entry point into this literature was Edward Thomson's open-source
-[ECDH-PSI implementation](https://github.com/EdwardAThomson/Private-Set-Intersection), a
-readable working embodiment of the classical protocol that let us prototype in days. What
-we changed, and why, is in the paper's related-work section.
-
-What is ours is the adaptation: the reduction to one bit run both ways, the fixed-size
-padding, the seed-derived determinism that makes a transcript recomputable — scoped to
-epochs, so a published secret is a spent one — the retroactive binding of the blinded
-query element, and the substitution of after-the-fact attribution for an in-round proof,
-which is what makes fog of war affordable on a metered consensus engine.
-
-Game channels, the setting all of this lives in, are due to Daniel Kraft:
-[*Game Channels for Trustless Off-Chain Interactions in Decentralized Virtual Worlds*](https://ledgerjournal.org/ojs/ledger/article/download/15/64/397)
-(PDF), Ledger 1:84–98 (2016), [doi:10.5195/ledger.2016.15](https://doi.org/10.5195/ledger.2016.15).
-
-## Authors
-
-Xaya Developers: Andrew Colosimo, Roy Crombleholme, Andrew Gore, Konstantin Gorskov,
-and Daniel Kraft.
-
-MIT licensed.
+Passing these checks supports the tested arithmetic and encodings. It does not
+prove privacy, novelty, current-game compatibility, or every claim in the paper.
+The paper separates exact byte/operation counts from historical measurements and
+identifies the current platform limits by source revision.

@@ -7,12 +7,9 @@
 // clang lowers to i64 pairs for wasm32: no imports, no intrinsics beyond the
 // compiler.
 //
-// NOTHING HERE IS SECRET-DEPENDENT IN ITS BRANCHING except the final equality tests
-// in petFinish, which decide the bit both sides are about to learn anyway. The
-// ladder runs a fixed 255 iterations with arithmetic swaps; the Elligator
-// exceptional case is a constant-time select in spirit if not in ceremony --
-// consensus needs determinism first, and none of this runs under an attacker's
-// stopwatch on a metered path.
+// The ladder runs 255 iterations with arithmetic swaps, but sorting and
+// comparisons are data-dependent. Determinism is not constant-time execution;
+// this reference does not provide timing or memory-access side-channel protection.
 
 #include "fow.hpp"
 #include "sha256.hpp"
@@ -398,16 +395,16 @@ namespace {
 // DELIBERATELY ROUND-DEPENDENT, and it was not always: an earlier revision hashed
 // "DCHD" || seed || LE16(i) with no round in the preimage, so a party's pad points
 // were fixed for the life of its seed. That is a trap for any surrounding protocol
-// that ever publishes a round's blinding scalar -- the deployed game's disputes do,
-// by design. alpha_r is invertible mod the group order, so a published alpha_r
-// unblinds that round's pad; if those same D_i stayed in service, each recovered
-// point replayed as a query Q reads a threshold bit about the CURRENT set size
+// that publishes a round's blinding scalar, as the historical sight disputes did.
+// alpha_r is invertible mod the group order, so a published alpha_r unblinds that
+// round's set, query and pad; if those same D_i stayed in service, each recovered
+// pad point replayed as a query Q reads a threshold bit about the CURRENT set size
 // (petBuild fills slots >= count with dummies, so "still in use" bounds |set| by
 // that element's index), round after round -- a standing handle on the one quantity
 // the fixed-size pad exists to hide. Folding the round into the preimage confines
 // any recovery to the round already disclosed. The cost: only elementPoint outputs
-// can be precomputed; the pad is re-derived each round, the same PET_PAD maps the
-// budget already prices. See paper/ section 4.1.
+// can be precomputed; the pad is re-derived each round with the same PET_PAD
+// ladders as before. The paper's epoch-disclosure paragraph records the reasoning.
 void dummyPoint(const uint8_t seed[HASH_BYTES], uint16_t round, uint16_t i,
                 uint8_t out[32]) {
   uint8_t buf[4 + HASH_BYTES + 4 + 2];
@@ -431,8 +428,8 @@ int petBuild(const uint8_t seed[HASH_BYTES], uint16_t round, uint16_t ownElement
   petScalar(seed, round, alpha);
 
   // S: the blinded set, padded with blinded dummies to a fixed size. The dummies are
-  // hashed to the curve exactly like real elements, so the work is constant
-  // (PET_PAD maps + PET_PAD ladders) whatever the set size, so no timing tell either.
+  // hashed to the curve like real elements. The map and ladder counts are fixed;
+  // this does not make the complete operation constant-time.
   uint8_t entries[PET_PAD][PET_POINT_BYTES];
   for (int i = 0; i < PET_PAD; ++i) {
     uint8_t p[32];
@@ -528,9 +525,10 @@ const uint8_t* leafPoint(const uint8_t* flight1, const uint8_t flight2[32], int 
 }
 
 // The whole tree, bottom level first, packed into one buffer: level 0 is the 256
-// leaf hashes, then 128, 64, ... 1. Static because 256 * 32 bytes is too much stack
-// for a wasm reactor frame, and it is fully overwritten on every call, so nothing
-// carries between calls, so determinism is preserved.
+// leaf hashes, then 128, 64, ... 1 -- 2 * 256 * 32 = 16,384 bytes, kept static
+// rather than on a wasm reactor frame's stack. It is fully overwritten on every
+// call, so nothing carries between calls and determinism is preserved, but callers
+// must serialize: a concurrent call returns a wrong root with no error.
 uint8_t g_tree[2 * PET_MERKLE_LEAVES][HASH_BYTES];
 
 void buildTree(const uint8_t* flight1, const uint8_t flight2[32]) {
@@ -548,12 +546,13 @@ void buildTree(const uint8_t* flight1, const uint8_t flight2[32]) {
 
 }  // namespace
 
-void petFlightHash(const uint8_t* flight1, const uint8_t flight2[32],
-                   uint8_t out[HASH_BYTES]) {
-  if (!flight1 || !flight2 || !out) return;
+int petFlightHash(const uint8_t* flight1, const uint8_t flight2[32],
+                  uint8_t out[HASH_BYTES]) {
+  if (!flight1 || !flight2 || !out) return -1;
   buildTree(flight1, flight2);
   // The last node written is the root: levels are 256 + 128 + ... + 1 entries.
   for (int i = 0; i < HASH_BYTES; ++i) out[i] = g_tree[2 * PET_MERKLE_LEAVES - 2][i];
+  return 0;
 }
 
 int petMerklePath(const uint8_t* flight1, const uint8_t flight2[32], int leafIndex,

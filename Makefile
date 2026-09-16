@@ -12,13 +12,14 @@ build/test_fow: src/fow.cpp src/sha256.cpp tests/test_fow.cpp include/fow.hpp sr
 	$(CXX) $(CXXFLAGS) $(INC) -o $@ src/fow.cpp src/sha256.cpp tests/test_fow.cpp
 
 # The C++ tests: RFC 7748 vectors, the subgroup identity, the protocol end to end,
-# and byte-identity with the deployed game.
+# and the historical Dungeon Channel fixture.
 test: build/test_fow
 	@./build/test_fow
 
 # The independent implementation: a from-scratch BigInt version written from the
-# paper's formulas, which must reproduce the C++ byte for byte. Needs node.
-verify: build/test_fow
+# paper's formulas and its stated encoding conventions, checked against the same
+# pinned vectors as the C++. Needs node only.
+verify:
 	@node tests/verify-math.mjs
 
 paper:
